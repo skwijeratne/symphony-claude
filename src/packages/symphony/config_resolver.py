@@ -63,9 +63,7 @@ def _group(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise ConfigValidationError(
-            f"'{name}' must be a map, got {type(raw).__name__}"
-        )
+        raise ConfigValidationError(f"'{name}' must be a map, got {type(raw).__name__}")
     return raw
 
 

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from symphony.models import BlockerRef, Issue
 
 
-def _issue(**overrides) -> Issue:
-    base = {"id": "iss_1", "identifier": "ABC-123", "title": "Title", "state": "Todo"}
+def _issue(**overrides: Any) -> Issue:
+    base: dict[str, Any] = {
+        "id": "iss_1",
+        "identifier": "ABC-123",
+        "title": "Title",
+        "state": "Todo",
+    }
     base.update(overrides)
     return Issue(**base)
 

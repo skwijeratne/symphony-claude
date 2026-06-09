@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "symphony"
+version = "0.1.0"
+description = "Service that orchestrates coding agents (Claude Code, headless) to deliver tracker-driven work."
+readme = "SPEC.md"
+requires-python = ">=3.13"
+license = { text = "Proprietary" }
+authors = [{ name = "skwijeratne" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "black>=24.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/packages/symphony"]
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+
+# ---------------------------------------------------------------------------
+# Linting
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src/packages", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PTH",  # flake8-use-pathlib
+    "TID",  # flake8-tidy-imports
+    "RUF",  # ruff-specific rules
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# TECH.md: absolute imports only, no relative imports.
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["symphony"]
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+files = ["src/packages/symphony", "tests"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Tests may omit return-type annotations on test functions for readability.
+disallow_untyped_defs = false
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --cov=symphony --cov-report=term-missing"

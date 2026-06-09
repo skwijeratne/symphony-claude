@@ -138,11 +138,13 @@ def _resolve_api_key(group: Mapping[str, Any], env: Mapping[str, str]) -> str | 
 
 def _to_absolute(value: str, base: Path, env: Mapping[str, str]) -> Path:
     """Expand ``~``/``$VAR`` and resolve to an absolute path (SPEC §5.3.3, §6.1)."""
-    expanded = os.path.expanduser(_expandvars(value, env))
-    path = Path(expanded)
+    path = Path(_expandvars(value, env)).expanduser()
     if not path.is_absolute():
         path = base / path
-    return Path(os.path.abspath(path))
+    # os.path.abspath normalizes (collapses '..') and anchors relative paths to
+    # cwd WITHOUT resolving symlinks; Path.resolve() would resolve symlinks, which
+    # makes resolved roots unpredictable. Keep the predictable lexical form.
+    return Path(os.path.abspath(path))  # noqa: PTH100
 
 
 def _normalize_state_concurrency(raw: Any) -> dict[str, int]:

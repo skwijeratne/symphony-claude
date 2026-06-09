@@ -74,14 +74,25 @@ def _split_front_matter(text: str) -> tuple[str | None, str]:
     Raises:
         WorkflowParseError: If an opening ``---`` fence has no closing fence.
     """
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != _FENCE:
+    first_newline = text.find("\n")
+    first_line = text if first_newline == -1 else text[:first_newline]
+    if first_line.strip() != _FENCE:
         return None, text
-    for index in range(1, len(lines)):
-        if lines[index].strip() == _FENCE:
-            front_matter = "".join(lines[1:index])
-            body = "".join(lines[index + 1 :])
-            return front_matter, body
+
+    # Scan line by line for the closing fence, but only across the front-matter
+    # region: once it is found the body is sliced in one shot and never tokenized
+    # (it can be a large prompt template).
+    fm_start = first_newline + 1 if first_newline != -1 else len(text)
+    pos = fm_start
+    while pos < len(text):
+        newline = text.find("\n", pos)
+        if newline == -1:
+            if text[pos:].strip() == _FENCE:
+                return text[fm_start:pos], ""
+            break
+        if text[pos:newline].strip() == _FENCE:
+            return text[fm_start:pos], text[newline + 1 :]
+        pos = newline + 1
     raise WorkflowParseError(
         "unterminated YAML front matter: opening '---' has no closing '---'"
     )

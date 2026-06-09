@@ -54,6 +54,11 @@ select = [
     "TID",  # flake8-tidy-imports
     "RUF",  # ruff-specific rules
 ]
+ignore = [
+    # __all__ in exceptions.py is grouped by failure class (SPEC §14.1) for
+    # readability rather than sorted alphabetically.
+    "RUF022",
+]
 
 [tool.ruff.lint.flake8-tidy-imports]
 # TECH.md: absolute imports only, no relative imports.

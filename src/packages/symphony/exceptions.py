@@ -24,6 +24,7 @@ __all__ = [
     "MissingWorkflowFileError",
     "WorkflowParseError",
     "WorkflowFrontMatterNotAMapError",
+    "ConfigValidationError",
     "TemplateParseError",
     "TemplateRenderError",
     # Workspace (SPEC §14.1)
@@ -114,6 +115,17 @@ class WorkflowFrontMatterNotAMapError(WorkflowConfigError):
     """The parsed front matter root is not a mapping object (SPEC §5.5)."""
 
     code = "workflow_front_matter_not_a_map"
+
+
+class ConfigValidationError(WorkflowConfigError):
+    """A typed config value failed coercion/validation (SPEC §6.1 step 5).
+
+    Raised when a present front-matter value has the wrong type or an
+    out-of-range value (for example a non-positive ``agent.max_turns`` or a
+    non-integer ``hooks.timeout_ms``; SPEC §5.3.4, §5.3.5).
+    """
+
+    code = "config_validation_error"
 
 
 class TemplateParseError(WorkflowConfigError):

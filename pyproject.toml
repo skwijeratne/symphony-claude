@@ -12,6 +12,7 @@ license = { text = "Proprietary" }
 authors = [{ name = "skwijeratne" }]
 dependencies = [
     "pyyaml>=6.0",
+    "python-liquid>=2.0,<3",
 ]
 
 [project.optional-dependencies]
@@ -85,6 +86,11 @@ files = ["src/packages/symphony", "tests"]
 module = "tests.*"
 # Tests may omit return-type annotations on test functions for readability.
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "liquid.*"
+# Defensive: don't fail type-checking if python-liquid ships without type info.
+ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
 # Testing

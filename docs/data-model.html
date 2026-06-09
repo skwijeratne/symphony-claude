@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Symphony — Core Domain Model (SPEC §4)</title>
+<style>
+  :root {
+    --bg: #0f1220;
+    --panel: #1a1f33;
+    --panel-2: #222840;
+    --ink: #e7ebf5;
+    --muted: #9aa3bd;
+    --line: #3a4266;
+    --accent: #6ea8fe;
+    --green: #4ec9a8;
+    --amber: #e0b15a;
+    --pink: #d782d9;
+    --border: #2c3350;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 28px 32px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 6px; font-size: 24px; }
+  header p { margin: 0; color: var(--muted); }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 24px 32px 64px; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 18px;
+    margin: 18px 0 28px; color: var(--muted); font-size: 13px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 22px; height: 0; border-top: 2px solid var(--accent); display: inline-block; }
+  .swatch.dashed { border-top-style: dashed; border-color: var(--pink); }
+  .swatch.box { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border); }
+  .swatch.impl { background: rgba(78,201,168,.18); border-color: var(--green); }
+  .swatch.plan { background: rgba(224,177,90,.14); border-color: var(--amber); }
+
+  figure { margin: 0 0 40px; }
+  .diagram {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    overflow-x: auto;
+  }
+  svg { display: block; min-width: 1080px; width: 100%; height: auto; }
+  .ent-box { fill: var(--panel-2); stroke: var(--border); stroke-width: 1.5; rx: 8; }
+  .ent-box.impl { stroke: var(--green); }
+  .ent-title { fill: var(--ink); font-weight: 700; font-size: 15px; }
+  .ent-sub { fill: var(--muted); font-size: 11px; }
+  .rel { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+  .rel.derive { stroke: var(--pink); stroke-dasharray: 5 4; }
+  .rel-label {
+    fill: var(--muted); font-size: 11px;
+  }
+  .rel-label-bg { fill: var(--panel); }
+
+  h2 { margin: 40px 0 10px; font-size: 19px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .card.impl { border-color: var(--green); }
+  .card h3 {
+    margin: 0; padding: 12px 14px;
+    font-size: 15px; display: flex; align-items: center; justify-content: space-between;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .card h3 .ref { color: var(--muted); font-size: 12px; font-weight: 400; }
+  .tag { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 2px 7px; border-radius: 99px; }
+  .tag.impl { color: var(--green); background: rgba(78,201,168,.14); }
+  .tag.plan { color: var(--amber); background: rgba(224,177,90,.12); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 6px 14px; border-top: 1px solid var(--border); vertical-align: top; }
+  td.f { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; color: var(--accent); white-space: nowrap; }
+  td.t { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; color: var(--green); white-space: nowrap; font-size: 12px; }
+  td.n { color: var(--muted); }
+  .card .derived td.f { color: var(--pink); }
+  footer { color: var(--muted); font-size: 13px; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; }
+  code { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Symphony — Core Domain Model</h1>
+  <p>Entities and relationships defined in <strong>SPEC.md §4</strong>. Source of truth is the spec; this is a navigational view.</p>
+</header>
+
+<div class="wrap">
+  <div class="legend">
+    <span><i class="swatch box impl"></i> implemented</span>
+    <span><i class="swatch box plan"></i> planned (later PR)</span>
+    <span><i class="swatch"></i> references / contains</span>
+    <span><i class="swatch dashed"></i> derived&nbsp;/&nbsp;configures</span>
+    <span>multiplicities: <code>1</code>, <code>0..1</code>, <code>*</code></span>
+  </div>
+
+  <figure>
+    <div class="diagram">
+      <!-- 1180 x 660 ER overview. Coordinates are fixed for layout stability. -->
+      <svg viewBox="0 0 1180 660" role="img" aria-label="Entity relationship diagram of the Symphony core domain model">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#6ea8fe" />
+          </marker>
+          <marker id="arrow-pink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#d782d9" />
+          </marker>
+        </defs>
+
+        <!-- ===================== relationships (drawn under boxes) ===================== -->
+        <!-- WorkflowDefinition -> ServiceConfig (derive) -->
+        <path class="rel derive" d="M145,120 L145,180" marker-end="url(#arrow-pink)" />
+        <!-- ServiceConfig -> OrchestratorState (configures) -->
+        <path class="rel derive" d="M250,235 L330,205" marker-end="url(#arrow-pink)" />
+        <!-- OrchestratorState -> RetryEntry (retry_attempts *) -->
+        <path class="rel" d="M580,150 L680,105" marker-end="url(#arrow)" />
+        <!-- OrchestratorState -> RunAttempt (running *) -->
+        <path class="rel" d="M580,230 L680,270" marker-end="url(#arrow)" />
+        <!-- OrchestratorState -> Issue (claimed/completed) -->
+        <path class="rel" d="M455,300 L455,410" marker-end="url(#arrow)" />
+        <!-- RunAttempt -> LiveSession (1 : 0..1) -->
+        <path class="rel" d="M890,285 L950,285" marker-end="url(#arrow)" />
+        <!-- RunAttempt -> Workspace (workspace_path) -->
+        <path class="rel" d="M760,350 L760,410" marker-end="url(#arrow)" />
+        <!-- RunAttempt -> Issue (issue_id) -->
+        <path class="rel" d="M680,320 L580,470" marker-end="url(#arrow)" />
+        <!-- Workspace -> Issue (identifier) -->
+        <path class="rel" d="M680,465 L580,500" marker-end="url(#arrow)" />
+        <!-- Issue -> BlockerRef (blocked_by *) -->
+        <path class="rel" d="M330,500 L250,500" marker-end="url(#arrow)" />
+
+        <!-- relationship labels -->
+        <g class="rel-label">
+          <text x="152" y="154">derives</text>
+          <text x="262" y="208">configures</text>
+          <text x="600" y="118">retry_attempts 1..*</text>
+          <text x="600" y="262">running 1..*</text>
+          <text x="462" y="362">claimed / completed</text>
+          <text x="893" y="278">1 : 0..1</text>
+          <text x="766" y="388">workspace_path</text>
+          <text x="600" y="408">issue_id</text>
+          <text x="600" y="492">identifier</text>
+          <text x="258" y="492">blocked_by 0..*</text>
+        </g>
+
+        <!-- ===================== entity boxes ===================== -->
+        <!-- WorkflowDefinition -->
+        <g>
+          <rect class="ent-box" x="40" y="40" width="210" height="80" rx="8" />
+          <text class="ent-title" x="60" y="70">WorkflowDefinition</text>
+          <text class="ent-sub" x="60" y="92">§4.1.2 · config map</text>
+          <text class="ent-sub" x="60" y="108">+ prompt_template</text>
+        </g>
+        <!-- ServiceConfig -->
+        <g>
+          <rect class="ent-box" x="40" y="180" width="210" height="110" rx="8" />
+          <text class="ent-title" x="60" y="210">ServiceConfig</text>
+          <text class="ent-sub" x="60" y="232">§4.1.3 · typed view</text>
+          <text class="ent-sub" x="60" y="248">poll interval, roots,</text>
+          <text class="ent-sub" x="60" y="264">states, concurrency,</text>
+          <text class="ent-sub" x="60" y="280">agent + hooks config</text>
+        </g>
+        <!-- OrchestratorState -->
+        <g>
+          <rect class="ent-box" x="330" y="110" width="250" height="190" rx="8" />
+          <text class="ent-title" x="352" y="140">OrchestratorState</text>
+          <text class="ent-sub" x="352" y="162">§4.1.8 · single authority</text>
+          <text class="ent-sub" x="352" y="184">running, claimed,</text>
+          <text class="ent-sub" x="352" y="200">retry_attempts, completed,</text>
+          <text class="ent-sub" x="352" y="216">agent_totals,</text>
+          <text class="ent-sub" x="352" y="232">agent_rate_limits,</text>
+          <text class="ent-sub" x="352" y="248">poll_interval_ms,</text>
+          <text class="ent-sub" x="352" y="264">max_concurrent_agents</text>
+        </g>
+        <!-- RetryEntry -->
+        <g>
+          <rect class="ent-box" x="680" y="40" width="210" height="120" rx="8" />
+          <text class="ent-title" x="700" y="70">RetryEntry</text>
+          <text class="ent-sub" x="700" y="92">§4.1.7 · scheduled retry</text>
+          <text class="ent-sub" x="700" y="110">attempt, due_at_ms,</text>
+          <text class="ent-sub" x="700" y="126">timer_handle, error</text>
+          <text class="ent-sub" x="700" y="142">issue_id, identifier</text>
+        </g>
+        <!-- RunAttempt -->
+        <g>
+          <rect class="ent-box" x="680" y="210" width="210" height="140" rx="8" />
+          <text class="ent-title" x="700" y="240">RunAttempt</text>
+          <text class="ent-sub" x="700" y="262">§4.1.5 · one execution</text>
+          <text class="ent-sub" x="700" y="280">issue_id, issue_identifier,</text>
+          <text class="ent-sub" x="700" y="296">attempt, workspace_path,</text>
+          <text class="ent-sub" x="700" y="312">started_at, status, error</text>
+        </g>
+        <!-- LiveSession -->
+        <g>
+          <rect class="ent-box" x="950" y="210" width="200" height="200" rx="8" />
+          <text class="ent-title" x="970" y="240">LiveSession</text>
+          <text class="ent-sub" x="970" y="262">§4.1.6 · worker run</text>
+          <text class="ent-sub" x="970" y="280">session_id, agent_pid,</text>
+          <text class="ent-sub" x="970" y="296">last_event(+ts),</text>
+          <text class="ent-sub" x="970" y="312">last_message,</text>
+          <text class="ent-sub" x="970" y="328">input/output/total_tokens,</text>
+          <text class="ent-sub" x="970" y="344">last_cost_usd,</text>
+          <text class="ent-sub" x="970" y="360">turn_count</text>
+        </g>
+        <!-- Workspace -->
+        <g>
+          <rect class="ent-box" x="680" y="410" width="210" height="110" rx="8" />
+          <text class="ent-title" x="700" y="440">Workspace</text>
+          <text class="ent-sub" x="700" y="462">§4.1.4 · per-issue dir</text>
+          <text class="ent-sub" x="700" y="480">path, workspace_key,</text>
+          <text class="ent-sub" x="700" y="496">created_now</text>
+        </g>
+        <!-- Issue (implemented) -->
+        <g>
+          <rect class="ent-box impl" x="330" y="410" width="250" height="170" rx="8" />
+          <text class="ent-title" x="352" y="440">Issue</text>
+          <text class="ent-sub" x="352" y="462">§4.1.1 · normalized record</text>
+          <text class="ent-sub" x="352" y="480">id, identifier, title, state,</text>
+          <text class="ent-sub" x="352" y="496">description, priority,</text>
+          <text class="ent-sub" x="352" y="512">branch_name, url, labels,</text>
+          <text class="ent-sub" x="352" y="528">blocked_by, timestamps</text>
+          <text class="ent-sub" x="352" y="548">↳ workspace_key,</text>
+          <text class="ent-sub" x="352" y="564">&nbsp;&nbsp;&nbsp;normalized_state</text>
+        </g>
+        <!-- BlockerRef (implemented) -->
+        <g>
+          <rect class="ent-box impl" x="40" y="445" width="210" height="100" rx="8" />
+          <text class="ent-title" x="60" y="475">BlockerRef</text>
+          <text class="ent-sub" x="60" y="497">§4.1.1 · blocker ref</text>
+          <text class="ent-sub" x="60" y="515">id, identifier, state</text>
+          <text class="ent-sub" x="60" y="533">(all optional)</text>
+        </g>
+      </svg>
+    </div>
+  </figure>
+
+  <h2>Field reference</h2>
+  <div class="grid">
+
+    <!-- Issue -->
+    <div class="card impl">
+      <h3><span>Issue <span class="ref">§4.1.1</span></span><span class="tag impl">implemented</span></h3>
+      <table>
+        <tr><td class="f">id</td><td class="t">str</td><td class="n">stable tracker-internal ID; map key</td></tr>
+        <tr><td class="f">identifier</td><td class="t">str</td><td class="n">human key, e.g. <code>ABC-123</code></td></tr>
+        <tr><td class="f">title</td><td class="t">str</td><td class="n"></td></tr>
+        <tr><td class="f">state</td><td class="t">str</td><td class="n">current tracker state name</td></tr>
+        <tr><td class="f">description</td><td class="t">str | None</td><td class="n"></td></tr>
+        <tr><td class="f">priority</td><td class="t">int | None</td><td class="n">lower = higher priority</td></tr>
+        <tr><td class="f">branch_name</td><td class="t">str | None</td><td class="n">tracker branch metadata</td></tr>
+        <tr><td class="f">url</td><td class="t">str | None</td><td class="n"></td></tr>
+        <tr><td class="f">labels</td><td class="t">list[str]</td><td class="n">normalized to lowercase</td></tr>
+        <tr><td class="f">blocked_by</td><td class="t">list[BlockerRef]</td><td class="n"></td></tr>
+        <tr><td class="f">created_at</td><td class="t">datetime | None</td><td class="n"></td></tr>
+        <tr><td class="f">updated_at</td><td class="t">datetime | None</td><td class="n"></td></tr>
+      </table>
+      <table class="derived">
+        <tr><td class="f">workspace_key</td><td class="t">str</td><td class="n">derived (§4.2): sanitized identifier</td></tr>
+        <tr><td class="f">normalized_state</td><td class="t">str</td><td class="n">derived (§4.2): lowercased state</td></tr>
+      </table>
+    </div>
+
+    <!-- BlockerRef -->
+    <div class="card impl">
+      <h3><span>BlockerRef <span class="ref">§4.1.1</span></span><span class="tag impl">implemented</span></h3>
+      <table>
+        <tr><td class="f">id</td><td class="t">str | None</td><td class="n">blocking issue ID</td></tr>
+        <tr><td class="f">identifier</td><td class="t">str | None</td><td class="n">blocking issue key</td></tr>
+        <tr><td class="f">state</td><td class="t">str | None</td><td class="n">blocking issue state</td></tr>
+      </table>
+    </div>
+
+    <!-- WorkflowDefinition -->
+    <div class="card">
+      <h3><span>WorkflowDefinition <span class="ref">§4.1.2</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="f">config</td><td class="t">map</td><td class="n">YAML front-matter root object</td></tr>
+        <tr><td class="f">prompt_template</td><td class="t">str</td><td class="n">trimmed markdown body</td></tr>
+      </table>
+    </div>
+
+    <!-- ServiceConfig -->
+    <div class="card">
+      <h3><span>ServiceConfig <span class="ref">§4.1.3</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="n" colspan="3">Typed runtime view derived from <code>WorkflowDefinition.config</code> + env resolution. Examples:</td></tr>
+        <tr><td class="f">poll_interval</td><td class="t">duration</td><td class="n"></td></tr>
+        <tr><td class="f">workspace_root</td><td class="t">path</td><td class="n"></td></tr>
+        <tr><td class="f">active / terminal states</td><td class="t">list[str]</td><td class="n"></td></tr>
+        <tr><td class="f">concurrency limits</td><td class="t">int / map</td><td class="n">global + per-state</td></tr>
+        <tr><td class="f">agent exec / args / timeouts</td><td class="t">…</td><td class="n">coding-agent config</td></tr>
+        <tr><td class="f">workspace hooks</td><td class="t">…</td><td class="n"></td></tr>
+      </table>
+    </div>
+
+    <!-- Workspace -->
+    <div class="card">
+      <h3><span>Workspace <span class="ref">§4.1.4</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="f">path</td><td class="t">path</td><td class="n">absolute workspace path</td></tr>
+        <tr><td class="f">workspace_key</td><td class="t">str</td><td class="n">sanitized issue identifier</td></tr>
+        <tr><td class="f">created_now</td><td class="t">bool</td><td class="n">gates <code>after_create</code> hook</td></tr>
+      </table>
+    </div>
+
+    <!-- RunAttempt -->
+    <div class="card">
+      <h3><span>RunAttempt <span class="ref">§4.1.5</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="f">issue_id</td><td class="t">str</td><td class="n"></td></tr>
+        <tr><td class="f">issue_identifier</td><td class="t">str</td><td class="n"></td></tr>
+        <tr><td class="f">attempt</td><td class="t">int | None</td><td class="n">None = first run; ≥1 = retry/continuation</td></tr>
+        <tr><td class="f">workspace_path</td><td class="t">path</td><td class="n"></td></tr>
+        <tr><td class="f">started_at</td><td class="t">timestamp</td><td class="n"></td></tr>
+        <tr><td class="f">status</td><td class="t">str</td><td class="n"></td></tr>
+        <tr><td class="f">error</td><td class="t">str?</td><td class="n">optional</td></tr>
+      </table>
+    </div>
+
+    <!-- LiveSession -->
+    <div class="card">
+      <h3><span>LiveSession <span class="ref">§4.1.6</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="f">session_id</td><td class="t">str</td><td class="n">Claude Code session; reused via <code>--resume</code></td></tr>
+        <tr><td class="f">agent_pid</td><td class="t">str | None</td><td class="n">current turn PID, else null</td></tr>
+        <tr><td class="f">last_event</td><td class="t">str | None</td><td class="n">last stream-json event type</td></tr>
+        <tr><td class="f">last_event_timestamp</td><td class="t">ts | None</td><td class="n"></td></tr>
+        <tr><td class="f">last_message</td><td class="t">summary</td><td class="n"></td></tr>
+        <tr><td class="f">input_tokens</td><td class="t">int</td><td class="n"></td></tr>
+        <tr><td class="f">output_tokens</td><td class="t">int</td><td class="n"></td></tr>
+        <tr><td class="f">total_tokens</td><td class="t">int</td><td class="n">accumulated across turns</td></tr>
+        <tr><td class="f">last_cost_usd</td><td class="t">num | None</td><td class="n"></td></tr>
+        <tr><td class="f">turn_count</td><td class="t">int</td><td class="n"></td></tr>
+      </table>
+    </div>
+
+    <!-- RetryEntry -->
+    <div class="card">
+      <h3><span>RetryEntry <span class="ref">§4.1.7</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="f">issue_id</td><td class="t">str</td><td class="n"></td></tr>
+        <tr><td class="f">identifier</td><td class="t">str</td><td class="n">best-effort human ID</td></tr>
+        <tr><td class="f">attempt</td><td class="t">int</td><td class="n">1-based retry counter</td></tr>
+        <tr><td class="f">due_at_ms</td><td class="t">int</td><td class="n">monotonic clock timestamp</td></tr>
+        <tr><td class="f">timer_handle</td><td class="t">ref</td><td class="n">runtime-specific timer</td></tr>
+        <tr><td class="f">error</td><td class="t">str | None</td><td class="n"></td></tr>
+      </table>
+    </div>
+
+    <!-- OrchestratorState -->
+    <div class="card">
+      <h3><span>OrchestratorState <span class="ref">§4.1.8</span></span><span class="tag plan">planned</span></h3>
+      <table>
+        <tr><td class="f">poll_interval_ms</td><td class="t">int</td><td class="n">current effective interval</td></tr>
+        <tr><td class="f">max_concurrent_agents</td><td class="t">int</td><td class="n">current global limit</td></tr>
+        <tr><td class="f">running</td><td class="t">map[id → entry]</td><td class="n"></td></tr>
+        <tr><td class="f">claimed</td><td class="t">set[id]</td><td class="n">reserved / running / retrying</td></tr>
+        <tr><td class="f">retry_attempts</td><td class="t">map[id → RetryEntry]</td><td class="n"></td></tr>
+        <tr><td class="f">completed</td><td class="t">set[id]</td><td class="n">bookkeeping only</td></tr>
+        <tr><td class="f">agent_totals</td><td class="t">aggregate</td><td class="n">tokens + runtime + cost</td></tr>
+        <tr><td class="f">agent_rate_limits</td><td class="t">snapshot</td><td class="n">from agent events</td></tr>
+      </table>
+    </div>
+
+  </div>
+
+  <footer>
+    Generated as a navigational companion to <code>SPEC.md §4</code> and <code>ROADMAP.md</code>.
+    <code>Issue</code> and <code>BlockerRef</code> are implemented (M0 PR #2); the remaining entities
+    land in later PRs. When the spec and this diagram disagree, the spec wins.
+  </footer>
+</div>
+</body>
+</html>

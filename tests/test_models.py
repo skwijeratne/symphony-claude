@@ -126,7 +126,8 @@ def test_run_attempt_defaults():
 
 
 def test_run_attempt_phase_is_str_enum():
-    assert RunAttemptPhase.SUCCEEDED == "succeeded"
+    assert isinstance(RunAttemptPhase.SUCCEEDED, str)  # StrEnum
+    assert RunAttemptPhase.SUCCEEDED.value == "succeeded"
     assert RunAttemptPhase("failed") is RunAttemptPhase.FAILED
     # All 11 lifecycle phases from SPEC §7.2 are present.
     assert len(list(RunAttemptPhase)) == 11

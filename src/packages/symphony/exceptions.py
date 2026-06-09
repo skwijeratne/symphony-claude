@@ -25,6 +25,7 @@ __all__ = [
     "WorkflowParseError",
     "WorkflowFrontMatterNotAMapError",
     "ConfigValidationError",
+    "DispatchPreflightError",
     "TemplateParseError",
     "TemplateRenderError",
     # Workspace (SPEC §14.1)
@@ -126,6 +127,23 @@ class ConfigValidationError(WorkflowConfigError):
     """
 
     code = "config_validation_error"
+
+
+class DispatchPreflightError(WorkflowConfigError):
+    """Dispatch preflight validation failed (SPEC §6.3).
+
+    Raised at startup when the resolved config is not dispatchable. Per-tick
+    callers should instead inspect the problems and skip dispatch rather than
+    raise. Carries the stable :attr:`problem_codes` of every failed check.
+    """
+
+    code = "dispatch_preflight_failed"
+
+    def __init__(
+        self, message: str | None = None, *, problem_codes: list[str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.problem_codes = list(problem_codes or [])
 
 
 class TemplateParseError(WorkflowConfigError):

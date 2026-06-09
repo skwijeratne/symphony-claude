@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "symphony"
+name = "symphony-claude"
 version = "0.1.0"
 description = "Service that orchestrates coding agents (Claude Code, headless) to deliver tracker-driven work."
 readme = "SPEC.md"

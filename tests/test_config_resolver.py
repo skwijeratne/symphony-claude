@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,9 @@ from symphony.exceptions import ConfigValidationError
 from symphony.models import WorkflowDefinition
 
 
-def _resolve(config, *, workflow_dir, env=None) -> ServiceConfig:
+def _resolve(
+    config: dict[str, Any], *, workflow_dir: Path, env: dict[str, str] | None = None
+) -> ServiceConfig:
     definition = WorkflowDefinition(config=config, prompt_template="")
     return resolve_config(definition, workflow_dir=workflow_dir, env=env or {})
 
@@ -86,8 +89,9 @@ def test_workspace_root_absolute_is_preserved(tmp_path):
 
 def test_workspace_root_relative_resolves_against_workflow_dir(tmp_path):
     cfg = _resolve({"workspace": {"root": "ws/sub"}}, workflow_dir=tmp_path)
-    assert cfg.workspace.root == tmp_path / "ws" / "sub"
-    assert cfg.workspace.root.is_absolute()
+    root = cfg.workspace.root
+    assert root == tmp_path / "ws" / "sub"
+    assert root is not None and root.is_absolute()
 
 
 def test_workspace_root_tilde_expansion(tmp_path):

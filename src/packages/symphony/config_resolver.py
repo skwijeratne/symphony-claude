@@ -107,9 +107,7 @@ def _get_opt_str(group: Mapping[str, Any], key: str) -> str | None:
     return raw
 
 
-def _get_str_list(
-    group: Mapping[str, Any], key: str, default: list[str]
-) -> list[str]:
+def _get_str_list(group: Mapping[str, Any], key: str, default: list[str]) -> list[str]:
     if key not in group:
         return list(default)
     raw = group[key]
@@ -164,9 +162,7 @@ def _normalize_state_concurrency(raw: Any) -> dict[str, int]:
 
 
 # --- group resolvers ----------------------------------------------------------
-def _resolve_tracker(
-    group: Mapping[str, Any], env: Mapping[str, str]
-) -> TrackerConfig:
+def _resolve_tracker(group: Mapping[str, Any], env: Mapping[str, str]) -> TrackerConfig:
     return TrackerConfig(
         kind=_get_str(group, "kind", "linear"),
         endpoint=_get_str(group, "endpoint", _DEFAULT_ENDPOINT),

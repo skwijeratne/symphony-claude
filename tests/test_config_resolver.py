@@ -71,9 +71,7 @@ def test_api_key_var_resolving_to_empty_is_missing(tmp_path):
 
 
 def test_api_key_var_unset_is_missing(tmp_path):
-    cfg = _resolve(
-        {"tracker": {"api_key": "$NOPE"}}, workflow_dir=tmp_path, env={}
-    )
+    cfg = _resolve({"tracker": {"api_key": "$NOPE"}}, workflow_dir=tmp_path, env={})
     assert cfg.tracker.api_key is None
 
 

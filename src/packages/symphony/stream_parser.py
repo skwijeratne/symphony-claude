@@ -20,6 +20,35 @@ Two boundaries keep this focused on *parsing and classification*:
   (SPEC §10.2, §10.6). The runtime envelope a runner adds when emitting upstream
   (timestamp, ``agent_pid``, ``usage``, ``cost_usd``; §10.4) is likewise added
   there, reading from :attr:`AgentEvent.raw`.
+
+Example raw CLI events this parser consumes (one JSON object per stdout line; field
+sets are CLI-version-dependent per SPEC §10, so unlisted fields are tolerated)::
+
+    # system / init -> SESSION_STARTED (first event; carries the session id)
+    {"type": "system", "subtype": "init", "session_id": "abc-123",
+     "model": "claude-...", "cwd": "/work/ABC-1", "tools": ["Read", "Bash"]}
+
+    # system / api_retry -> API_RETRY
+    {"type": "system", "subtype": "api_retry", "error": "rate_limit",
+     "error_status": 429, "attempt": 1, "max_retries": 5}
+
+    # assistant -> NOTIFICATION (conversation message)
+    {"type": "assistant", "message": {"role": "assistant", "content": [...]},
+     "session_id": "abc-123"}
+
+    # result (success) -> TURN_COMPLETED (terminal event of the turn)
+    {"type": "result", "subtype": "success", "is_error": false,
+     "session_id": "abc-123", "num_turns": 3, "duration_ms": 8421,
+     "total_cost_usd": 0.0123, "usage": {"input_tokens": 1200,
+     "output_tokens": 340}, "result": "<final text>", "permission_denials": []}
+
+    # result (failure) -> TURN_FAILED (any error_* subtype, or is_error true)
+    {"type": "result", "subtype": "error_max_turns", "is_error": true,
+     "session_id": "abc-123", "api_error_status": null, "errors": [...]}
+
+The downstream fields shown on ``result`` (``usage``, ``total_cost_usd``,
+``api_error_status``, ``permission_denials``, ...) are read from
+:attr:`AgentEvent.raw` by the turn-lifecycle layer, not extracted here.
 """
 
 from __future__ import annotations

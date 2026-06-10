@@ -60,16 +60,17 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
   - ✅ PR 13 — Three operations + pagination (`linear_client.py`, §11.1) — merged; completes M3
 - **M4 — in progress** (§10):
   - ✅ PR 14 — Flag builder + launch (`agent_launcher.py`, §10.1) — merged
-  - 🔄 PR 15 — stream-json parser → normalized events (`stream_parser.py`, §10.3-10.4) — open PR,
+  - ✅ PR 15 — stream-json parser → normalized events (`stream_parser.py`, §10.3-10.4) — merged
+  - 🔄 PR 16 — Turn lifecycle + outcome + timeouts (`turn_runner.py`, §10.2, 10.6) — open PR,
     in review
-  - ⬜ PR 16 — Turn lifecycle + outcome + timeouts (§10.2, 10.6) — **next**
-  - ⬜ PR 17 — Continuation (`--resume`) + Agent Runner contract (§10.7, 16.5) — completes M4
+  - 🔄 PR 17 — Continuation (`--resume`) + Agent Runner contract (§10.7, 16.5) — open PR (stacked
+    on PR 16); completes M4
 - **M5–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,
 `preflight`, `workflow_loader`, `prompt_renderer`, `reload`, `workspace`, `hooks`,
-`linear_transport`, `linear_normalize`, `linear_client`, `agent_launcher`. Build the remaining PRs
-below in order, one PR each, leaving the repo green (see `CLAUDE.md`).
+`linear_transport`, `linear_normalize`, `linear_client`, `agent_launcher`, `stream_parser`. Build
+the remaining PRs below in order, one PR each, leaving the repo green (see `CLAUDE.md`).
 
 ## PR Breakdown
 

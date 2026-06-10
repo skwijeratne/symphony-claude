@@ -45,16 +45,18 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
 
 - **M0 — complete** (merged): repo tooling/skeleton + `exceptions.py`; `Issue`/`BlockerRef` +
   normalization; remaining domain models + typed `ServiceConfig`. Also `docs/data-model.html`.
-- **M1 — in progress** (§5, §6, §12):
+- **M1 — complete** (§5, §6, §12):
   - ✅ PR 4 — WORKFLOW.md loader (`workflow_loader.py`) — merged
   - ✅ PR 5 — Config layer (`config_resolver.py`) — merged
   - ✅ PR 6 — Dispatch preflight (`preflight.py`) — merged
-  - 🔄 PR 7 — Strict prompt rendering (`prompt_renderer.py`, python-liquid) — open PR, in review
-  - ⬜ PR 8 — Dynamic reload/watch (§6.2) — **next**; completes M1
-- **M2–M7 — not started.**
+  - ✅ PR 7 — Strict prompt rendering (`prompt_renderer.py`, python-liquid) — merged
+  - 🔄 PR 8 — Dynamic reload/watch (`reload.py`, §6.2) — open PR, in review; completes M1
+- **M2 — next**: workspace manager + safety (§9), starting with PR 9.
+- **M3–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,
-`preflight`, `workflow_loader`. Build the remaining PRs below in order, one PR each, leaving the
+`preflight`, `workflow_loader`, `prompt_renderer`. Build the remaining PRs below in order, one PR
+each, leaving the
 repo green (see `CLAUDE.md`).
 
 ## PR Breakdown

@@ -54,14 +54,17 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
 - **M2 — complete** (§9):
   - ✅ PR 9 — Workspace create/reuse + safety invariants (`workspace.py`, §9.1-9.2, 9.5) — merged
   - ✅ PR 10 — Workspace hooks (`hooks.py`, §9.4) — merged; completes M2
-- **M3 — in progress** (§11):
-  - 🔄 PR 11+12 — GraphQL transport + error mapping (`linear_transport.py`, §11.2, 11.4) and issue
-    normalization (`linear_normalize.py`, §11.3), combined — open PR, in review. Adds `httpx`.
-  - ⬜ PR 13 — Three operations + pagination (§11.1) — **next**; completes M3
-- **M4–M7 — not started.**
+- **M3 — complete** (§11):
+  - ✅ PR 11+12 — GraphQL transport + error mapping (`linear_transport.py`, §11.2, 11.4) and issue
+    normalization (`linear_normalize.py`, §11.3), combined — merged. Adds `httpx`.
+  - 🔄 PR 13 — Three operations + pagination (`linear_client.py`, §11.1) — open PR, in review;
+    completes M3
+- **M4 — next**: Claude CLI agent runner (§10), starting with PR 14.
+- **M5–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,
-`preflight`, `workflow_loader`, `prompt_renderer`, `reload`, `workspace`. Build the remaining PRs
+`preflight`, `workflow_loader`, `prompt_renderer`, `reload`, `workspace`, `hooks`,
+`linear_transport`, `linear_normalize`. Build the remaining PRs
 below in order, one PR each, leaving the repo green (see `CLAUDE.md`).
 
 ## PR Breakdown

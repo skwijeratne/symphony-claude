@@ -51,15 +51,15 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
   - ✅ PR 6 — Dispatch preflight (`preflight.py`) — merged
   - ✅ PR 7 — Strict prompt rendering (`prompt_renderer.py`, python-liquid) — merged
   - ✅ PR 8 — Dynamic reload/watch (`reload.py`, §6.2) — merged; completes M1
-- **M2 — in progress** (§9):
-  - 🔄 PR 9 — Workspace create/reuse + safety invariants (`workspace.py`, §9.1-9.2, 9.5) — open
-    PR, in review
-  - ⬜ PR 10 — Workspace hooks (§9.4) — **next**; completes M2
-- **M3–M7 — not started.**
+- **M2 — complete** (§9):
+  - ✅ PR 9 — Workspace create/reuse + safety invariants (`workspace.py`, §9.1-9.2, 9.5) — merged
+  - 🔄 PR 10 — Workspace hooks (`hooks.py`, §9.4) — open PR, in review; completes M2
+- **M3 — next**: Linear tracker client (§11), starting with PR 11.
+- **M4–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,
-`preflight`, `workflow_loader`, `prompt_renderer`, `reload`. Build the remaining PRs below in order,
-one PR each, leaving the repo green (see `CLAUDE.md`).
+`preflight`, `workflow_loader`, `prompt_renderer`, `reload`, `workspace`. Build the remaining PRs
+below in order, one PR each, leaving the repo green (see `CLAUDE.md`).
 
 ## PR Breakdown
 

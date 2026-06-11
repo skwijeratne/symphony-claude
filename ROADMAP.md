@@ -58,13 +58,14 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
   - ✅ PR 11+12 — GraphQL transport + error mapping (`linear_transport.py`, §11.2, 11.4) and issue
     normalization (`linear_normalize.py`, §11.3), combined — merged. Adds `httpx`.
   - ✅ PR 13 — Three operations + pagination (`linear_client.py`, §11.1) — merged; completes M3
-- **M4 — in progress** (§10):
+- **M4 — complete** (§10):
   - ✅ PR 14 — Flag builder + launch (`agent_launcher.py`, §10.1) — merged
   - ✅ PR 15 — stream-json parser → normalized events (`stream_parser.py`, §10.3-10.4) — merged
   - ✅ PR 16 — Turn lifecycle + outcome + timeouts (`turn_runner.py`, §10.2, 10.6) — merged
-  - 🔄 PR 17 — Continuation (`--resume`) + Agent Runner contract (`agent_runner.py`, §10.7, 16.5)
-    — open PR; completes M4
-- **M5 — next**: Orchestrator core (§7, §8, §16), starting with PR 18.
+  - ✅ PR 17 — Continuation (`--resume`) + Agent Runner contract (`agent_runner.py`, §10.7, 16.5)
+    — merged; completes M4
+- **M5 — in progress** (§7, §8, §16):
+  - 🔄 PR 18 — State + claim/dispatch primitives (`orchestrator.py`, §16.4) — open PR
 - **M6–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,

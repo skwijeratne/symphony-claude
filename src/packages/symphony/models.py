@@ -228,16 +228,23 @@ class RetryEntry:
 class RunningEntry:
     """A live worker tracked in :attr:`OrchestratorState.running` (SPEC §4.1.8).
 
-    Holds the in-flight attempt and its agent session. Worker/task handles are
-    added by the orchestrator PRs.
+    Holds the in-flight attempt and its agent session, plus the opaque runtime
+    handles used to monitor and stop the worker (SPEC §16.4). The handle types are
+    runtime-specific (task/process/monitor references) and are wired when the
+    service event loop is composed.
 
     Attributes:
         run_attempt: The attempt currently executing for the issue.
         session: The live agent session, once one has started.
+        worker_handle: Runtime handle for the spawned worker, or ``None``.
+        monitor_handle: Runtime handle watching for the worker's exit, or
+            ``None`` until attached by the event loop.
     """
 
     run_attempt: RunAttempt
     session: LiveSession | None = None
+    worker_handle: object | None = None
+    monitor_handle: object | None = None
 
 
 @dataclass(slots=True)

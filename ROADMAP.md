@@ -61,11 +61,11 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
 - **M4 — in progress** (§10):
   - ✅ PR 14 — Flag builder + launch (`agent_launcher.py`, §10.1) — merged
   - ✅ PR 15 — stream-json parser → normalized events (`stream_parser.py`, §10.3-10.4) — merged
-  - 🔄 PR 16 — Turn lifecycle + outcome + timeouts (`turn_runner.py`, §10.2, 10.6) — open PR,
-    in review
-  - 🔄 PR 17 — Continuation (`--resume`) + Agent Runner contract (§10.7, 16.5) — open PR (stacked
-    on PR 16); completes M4
-- **M5–M7 — not started.**
+  - ✅ PR 16 — Turn lifecycle + outcome + timeouts (`turn_runner.py`, §10.2, 10.6) — merged
+  - 🔄 PR 17 — Continuation (`--resume`) + Agent Runner contract (`agent_runner.py`, §10.7, 16.5)
+    — open PR; completes M4
+- **M5 — next**: Orchestrator core (§7, §8, §16), starting with PR 18.
+- **M6–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,
 `preflight`, `workflow_loader`, `prompt_renderer`, `reload`, `workspace`, `hooks`,

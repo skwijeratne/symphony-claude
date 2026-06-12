@@ -8,22 +8,25 @@ parsing, workflow path resolution, logging configuration (SPEC §16.1
 ``configure_logging()``), surfacing startup failures cleanly on stderr, and the
 exit-code contract (``0`` on a normal start-and-shutdown, nonzero on startup
 failure or an abnormal host exit). The application itself is the injected
-``run_app`` seam; the default :func:`run_application` performs the SPEC §16.1
-startup sequence as far as M6 builds it — initial workflow load/resolve and
-dispatch preflight validation — and then shuts down cleanly. Composing the
-event loop behind this seam is M7 (ROADMAP item 26).
+``run_app`` seam; the default :func:`run_application` composes the real
+:class:`~symphony.service.SymphonyService` from the workflow, installs
+``SIGINT``/``SIGTERM`` handlers for graceful shutdown, and blocks in its event
+loop until stopped (SPEC §16.1).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import signal
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol
 
-from symphony.exceptions import SymphonyError
-from symphony.preflight import ensure_dispatchable
+from symphony.exceptions import SymphonyError, WorkflowConfigError
 from symphony.reload import WorkflowReloader
+from symphony.service import SymphonyService
 from symphony.structured_logging import configure_logging, log_fields
 from symphony.workflow_loader import resolve_workflow_path
 
@@ -31,6 +34,8 @@ __all__ = [
     "EXIT_SUCCESS",
     "EXIT_STARTUP_FAILURE",
     "RunApp",
+    "ServiceHost",
+    "ServiceFactory",
     "run_application",
     "main",
 ]
@@ -50,32 +55,63 @@ RunApp = Callable[[Path], int]
 logger = logging.getLogger("symphony.cli")
 
 
-def run_application(workflow_path: Path) -> int:
-    """Default application: the SPEC §16.1 startup sequence as built so far.
+class ServiceHost(Protocol):
+    """What the CLI needs from the composed service (SPEC §16.1)."""
+
+    def serve(self) -> int: ...
+
+    def stop(self) -> None: ...
+
+
+# Builds the service for a workflow reloader; injectable for host-lifecycle tests.
+ServiceFactory = Callable[[WorkflowReloader], ServiceHost]
+
+
+def _log_reload_rejected(error: WorkflowConfigError) -> None:
+    """Operator-visible message for a rejected reload (SPEC §6.2)."""
+    logger.error(
+        "workflow reload rejected; keeping last known good config %s",
+        log_fields(error_code=error.code, reason=error.message),
+    )
+
+
+def run_application(
+    workflow_path: Path,
+    *,
+    service_factory: ServiceFactory = SymphonyService,
+) -> int:
+    """Default application: compose and run the service (SPEC §16.1).
 
     Loads and resolves the workflow (initial load failures are fatal startup
-    errors, SPEC §16.1) and runs dispatch preflight validation (SPEC §6.3,
-    §16.1 ``fail_startup``). The service event loop is composed in M7; until
-    then a validated startup shuts down cleanly.
+    errors, SPEC §16.1), composes the service, installs ``SIGINT``/``SIGTERM``
+    handlers that request a graceful shutdown, and blocks in the event loop
+    until stopped.
 
     Args:
         workflow_path: The resolved ``WORKFLOW.md`` path.
+        service_factory: Builds the service from the reloader; injectable so
+            host-lifecycle tests run without the real runtime.
 
     Returns:
-        :data:`EXIT_SUCCESS` on a normal start and shutdown.
+        :data:`EXIT_SUCCESS` after a normal start and graceful shutdown.
 
     Raises:
         WorkflowConfigError: The workflow failed to load/parse/resolve, or
-            dispatch preflight validation failed.
+            startup dispatch validation failed (SPEC §6.3).
     """
-    reloader = WorkflowReloader(workflow_path)
-    ensure_dispatchable(reloader.current.config)
-    logger.info("startup validated %s", log_fields(workflow_path=workflow_path))
-    logger.info(
-        "service event loop is not wired yet (M7); shutting down %s",
-        log_fields(outcome="completed"),
-    )
-    return EXIT_SUCCESS
+    reloader = WorkflowReloader(workflow_path, on_error=_log_reload_rejected)
+    service = service_factory(reloader)
+    logger.info("workflow loaded %s", log_fields(workflow_path=workflow_path))
+
+    saved_handlers: dict[signal.Signals, object] = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            saved_handlers[signum] = signal.signal(signum, lambda *_: service.stop())
+    try:
+        return service.serve()
+    finally:
+        for signum, handler in saved_handlers.items():
+            signal.signal(signum, handler)  # type: ignore[arg-type]
 
 
 def _build_parser() -> argparse.ArgumentParser:

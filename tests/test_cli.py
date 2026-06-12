@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from symphony.cli import (
     run_application,
 )
 from symphony.exceptions import DispatchPreflightError, MissingWorkflowFileError
+from symphony.reload import WorkflowReloader
 from symphony.structured_logging import SYMPHONY_LOGGER_NAME
 
 # A minimal workflow that passes dispatch preflight (SPEC §6.3).
@@ -139,11 +141,48 @@ def test_application_exit_code_is_passed_through(tmp_path: Path) -> None:
     assert main([str(path)], run_app=lambda _: 7) == 7
 
 
-# --- default application (SPEC §16.1 startup, as built so far) ---------------------
-def test_main_starts_and_shuts_down_normally_with_a_valid_workflow(
-    tmp_path: Path,
-) -> None:
-    assert main([str(_workflow(tmp_path))]) == EXIT_SUCCESS
+# --- default application (SPEC §16.1) ----------------------------------------------
+class _FakeService:
+    """A ``ServiceHost`` double recording lifecycle calls."""
+
+    def __init__(self, reloader: WorkflowReloader, *, exit_code: int = EXIT_SUCCESS):
+        self.reloader = reloader
+        self.exit_code = exit_code
+        self.served = 0
+        self.stopped = 0
+
+    def serve(self) -> int:
+        self.served += 1
+        return self.exit_code
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+
+def test_run_application_composes_and_serves_the_service(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    services: list[_FakeService] = []
+
+    def factory(reloader: WorkflowReloader) -> _FakeService:
+        services.append(_FakeService(reloader))
+        return services[-1]
+
+    assert run_application(path, service_factory=factory) == EXIT_SUCCESS
+
+    (service,) = services
+    assert service.served == 1
+    # The reloader handed over carries the loaded workflow config.
+    assert service.reloader.current.config.tracker.project_slug == "my-team"
+
+
+def test_run_application_restores_signal_handlers(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+
+    run_application(path, service_factory=lambda reloader: _FakeService(reloader))
+
+    after = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+    assert after == before
 
 
 def test_run_application_validates_dispatch_preflight(tmp_path: Path) -> None:
@@ -151,6 +190,8 @@ def test_run_application_validates_dispatch_preflight(tmp_path: Path) -> None:
         tmp_path,
         body="---\ntracker:\n  kind: linear\n---\nprompt\n",  # no api_key/slug
     )
+    # The default factory composes the real service, whose startup validation
+    # rejects an undispatchable config before any work begins (SPEC §6.3, §16.1).
     with pytest.raises(DispatchPreflightError):
         run_application(path)
 

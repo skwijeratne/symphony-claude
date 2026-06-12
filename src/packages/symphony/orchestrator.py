@@ -22,11 +22,12 @@ algorithms.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from symphony.config import ServiceConfig
 from symphony.models import (
     Issue,
     OrchestratorState,
@@ -34,6 +35,7 @@ from symphony.models import (
     RunAttemptPhase,
     RunningEntry,
 )
+from symphony.normalization import normalize_label, normalize_state
 from symphony.workspace import workspace_path_for
 
 __all__ = [
@@ -46,6 +48,11 @@ __all__ = [
     "claim",
     "release",
     "mark_completed",
+    "available_slots",
+    "running_count_for_state",
+    "per_state_available_slots",
+    "should_dispatch",
+    "sort_for_dispatch",
     "dispatch_issue",
 ]
 
@@ -136,6 +143,123 @@ def mark_completed(state: OrchestratorState, issue_id: str) -> OrchestratorState
     return state
 
 
+def available_slots(state: OrchestratorState) -> int:
+    """Global concurrency slots still free (SPEC §8.3).
+
+    ``max(max_concurrent_agents - running_count, 0)``.
+    """
+    return max(state.max_concurrent_agents - len(state.running), 0)
+
+
+def running_count_for_state(state: OrchestratorState, state_name: str) -> int:
+    """Number of running workers whose issue is in ``state_name`` (SPEC §8.3).
+
+    Issues are counted by their current tracked state in the ``running`` map; a
+    running entry whose issue is not yet known is not counted toward any state.
+    """
+    target = normalize_state(state_name)
+    return sum(
+        1
+        for entry in state.running.values()
+        if entry.issue is not None and entry.issue.normalized_state == target
+    )
+
+
+def per_state_available_slots(
+    state: OrchestratorState, config: ServiceConfig, state_name: str
+) -> int:
+    """Per-state concurrency slots still free for ``state_name`` (SPEC §8.3).
+
+    Uses ``agent.max_concurrent_agents_by_state`` (keys already normalized by the
+    config layer) when present, otherwise falls back to the global limit.
+    """
+    target = normalize_state(state_name)
+    limit = config.agent.max_concurrent_agents_by_state.get(
+        target, state.max_concurrent_agents
+    )
+    return max(limit - running_count_for_state(state, target), 0)
+
+
+def _has_core_fields(issue: Issue) -> bool:
+    """Whether the issue carries the REQUIRED identity fields (SPEC §8.2)."""
+    return bool(issue.id and issue.identifier and issue.title and issue.state)
+
+
+def _todo_blockers_clear(issue: Issue, terminal_states: set[str]) -> bool:
+    """Todo blocker rule: every blocker must be terminal (SPEC §8.2).
+
+    A blocker with an unknown state is treated as non-terminal (it blocks), since
+    the orchestrator cannot confirm it is resolved.
+    """
+    return all(
+        blocker.state is not None and normalize_state(blocker.state) in terminal_states
+        for blocker in issue.blocked_by
+    )
+
+
+def should_dispatch(
+    issue: Issue, state: OrchestratorState, config: ServiceConfig
+) -> bool:
+    """Whether ``issue`` is dispatch-eligible right now (SPEC §8.2).
+
+    Checks identity, active/terminal state, required labels, the not-running and
+    not-claimed claim guards (SPEC §7.1), global and per-state concurrency slots,
+    and the ``Todo`` blocker rule.
+
+    Assignee routing (SPEC §8.2) is intentionally not applied: the normative config
+    schema (SPEC §6.4) defines no assignee key and the ``Issue`` model (SPEC §4.1.1)
+    carries no assignee, so with no configured assignee every candidate routes here.
+    """
+    if not _has_core_fields(issue):
+        return False
+
+    active_states = {normalize_state(s) for s in config.tracker.active_states}
+    terminal_states = {normalize_state(s) for s in config.tracker.terminal_states}
+    issue_state = issue.normalized_state
+    if issue_state not in active_states or issue_state in terminal_states:
+        return False
+
+    required = {normalize_label(label) for label in config.tracker.required_labels}
+    if not required.issubset(set(issue.labels)):
+        return False
+
+    if is_running(state, issue.id) or is_claimed(state, issue.id):
+        return False
+
+    if available_slots(state) <= 0:
+        return False
+    if per_state_available_slots(state, config, issue.state) <= 0:
+        return False
+
+    # The blocker rule only applies to Todo issues (SPEC §8.2).
+    return issue_state != "todo" or _todo_blockers_clear(issue, terminal_states)
+
+
+def _dispatch_sort_key(issue: Issue) -> tuple[bool, int, bool, datetime, str]:
+    """Sort key implementing the dispatch order (SPEC §8.2).
+
+    ``priority`` ascending (null last), then ``created_at`` oldest first (null
+    last), then ``identifier`` lexicographically. The boolean null-flags guard the
+    value slots so the ``datetime.min`` placeholder is only ever compared against
+    itself (never against a real, possibly tz-aware timestamp).
+    """
+    return (
+        issue.priority is None,
+        issue.priority if issue.priority is not None else 0,
+        issue.created_at is None,
+        issue.created_at if issue.created_at is not None else datetime.min,
+        issue.identifier,
+    )
+
+
+def sort_for_dispatch(issues: Iterable[Issue]) -> list[Issue]:
+    """Return ``issues`` ordered by dispatch priority (SPEC §8.2).
+
+    ``sorted`` is stable, so issues that tie on every key keep their input order.
+    """
+    return sorted(issues, key=_dispatch_sort_key)
+
+
 def dispatch_issue(
     issue: Issue,
     state: OrchestratorState,
@@ -191,6 +315,7 @@ def dispatch_issue(
     )
     state.running[issue.id] = RunningEntry(
         run_attempt=run_attempt,
+        issue=issue,
         worker_handle=handle,
     )
     state.claimed.add(issue.id)

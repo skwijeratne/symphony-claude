@@ -235,6 +235,9 @@ class RunningEntry:
 
     Attributes:
         run_attempt: The attempt currently executing for the issue.
+        issue: The issue as last tracked for this worker; refreshed by
+            reconciliation and used for per-state concurrency counting (SPEC
+            §8.3, §16.3, §16.4).
         session: The live agent session, once one has started.
         worker_handle: Runtime handle for the spawned worker, or ``None``.
         monitor_handle: Runtime handle watching for the worker's exit, or
@@ -242,6 +245,7 @@ class RunningEntry:
     """
 
     run_attempt: RunAttempt
+    issue: Issue | None = None
     session: LiveSession | None = None
     worker_handle: object | None = None
     monitor_handle: object | None = None

@@ -493,7 +493,7 @@ def on_retry_timer(
     issue_id: str,
     state: OrchestratorState,
     *,
-    fetch_candidates: CandidateFetcher,
+    fetch_active_issue_candidates: CandidateFetcher,
     dispatch: DispatchFn,
     schedule_retry: ScheduleRetry,
 ) -> OrchestratorState:
@@ -507,7 +507,7 @@ def on_retry_timer(
     Args:
         issue_id: The issue whose retry timer fired.
         state: The authoritative orchestrator state (mutated in place).
-        fetch_candidates: Active-candidate fetch seam (tracker).
+        fetch_active_issue_candidates: Active-candidate fetch seam (tracker).
         dispatch: Bound dispatch seam (``dispatch_issue`` with its seams applied).
         schedule_retry: Retry-scheduling seam for the requeue paths.
     """
@@ -516,7 +516,7 @@ def on_retry_timer(
         return state
 
     try:
-        candidates = fetch_candidates()
+        active_issues = fetch_active_issue_candidates()
     except TrackerError:
         return schedule_retry(
             state,
@@ -526,7 +526,7 @@ def on_retry_timer(
             error="retry poll failed",
         )
 
-    issue = next((c for c in candidates if c.id == issue_id), None)
+    issue = next((c for c in active_issues if c.id == issue_id), None)
     if issue is None:
         state.claimed.discard(issue_id)
         return state

@@ -663,7 +663,7 @@ def test_on_retry_timer_missing_entry_is_noop() -> None:
     on_retry_timer(
         "i-1",
         state,
-        fetch_candidates=lambda: [],
+        fetch_active_issue_candidates=lambda: [],
         dispatch=dispatch,
         schedule_retry=_scheduler(_FakeTimers()),
     )
@@ -681,7 +681,7 @@ def test_on_retry_timer_dispatches_eligible_issue_at_stored_attempt() -> None:
     on_retry_timer(
         "i-1",
         state,
-        fetch_candidates=lambda: [issue],
+        fetch_active_issue_candidates=lambda: [issue],
         dispatch=dispatch,
         schedule_retry=_scheduler(_FakeTimers()),
     )
@@ -695,10 +695,11 @@ def test_on_retry_timer_releases_claim_when_issue_absent() -> None:
     _queue_retry(state, "i-1", attempt=1)
     calls, dispatch = _dispatch_spy()
 
+    # i-1 is not among the returned candidates.
     on_retry_timer(
         "i-1",
         state,
-        fetch_candidates=lambda: [_issue("i-2", "ABC-2")],  # i-1 not a candidate
+        fetch_active_issue_candidates=lambda: [_issue("i-2", "ABC-2")],
         dispatch=dispatch,
         schedule_retry=_scheduler(_FakeTimers()),
     )
@@ -718,7 +719,7 @@ def test_on_retry_timer_requeues_when_no_slots() -> None:
     on_retry_timer(
         "i-1",
         state,
-        fetch_candidates=lambda: [_issue(state="In Progress")],
+        fetch_active_issue_candidates=lambda: [_issue(state="In Progress")],
         dispatch=dispatch,
         schedule_retry=_scheduler(timers),
     )
@@ -742,7 +743,7 @@ def test_on_retry_timer_requeues_when_candidate_fetch_fails() -> None:
     on_retry_timer(
         "i-1",
         state,
-        fetch_candidates=failing_fetch,
+        fetch_active_issue_candidates=failing_fetch,
         dispatch=dispatch,
         schedule_retry=_scheduler(timers),
     )

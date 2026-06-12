@@ -60,6 +60,7 @@ __all__ = [
     # Observability (SPEC §14.1)
     "ObservabilityError",
     "SnapshotTimeoutError",
+    "SnapshotUnavailableError",
     "DashboardRenderError",
     "LogSinkConfigError",
 ]
@@ -358,6 +359,12 @@ class SnapshotTimeoutError(ObservabilityError):
     """A runtime snapshot request exceeded its timeout (SPEC §13.3)."""
 
     code = "snapshot_timeout"
+
+
+class SnapshotUnavailableError(ObservabilityError):
+    """The orchestrator state is not available for a snapshot (SPEC §13.3)."""
+
+    code = "snapshot_unavailable"
 
 
 class DashboardRenderError(ObservabilityError):

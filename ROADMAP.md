@@ -70,14 +70,19 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
   - ✅ PR 20 — Retry & backoff (`orchestrator.py`, §8.4, §16.6) — merged
   - ✅ PR 21 — Reconciliation: stall detection + tracker refresh (`orchestrator.py`,
     `workspace.py`, §8.5, §16.3) — merged
-  - 🔄 PR 22 — Poll tick + worker-exit accounting + startup cleanup (`orchestrator.py`,
-    §8.1, §8.6, §13.5, §16.2) — open PR; completes M5
-- **M6–M7 — not started.**
+  - ✅ PR 22 — Poll tick + worker-exit accounting + startup cleanup (`orchestrator.py`,
+    §8.1, §8.6, §13.5, §16.2) — merged; completes M5
+- **M6 — in progress** (§13, §17.7):
+  - 🔄 PRs 23–25 in one PR — Structured logging (`structured_logging.py`, §13.1-13.2), runtime
+    snapshot (`snapshot.py`, §13.3), CLI entrypoint + host lifecycle (`cli.py`, §17.7) — open PR;
+    completes M6
+- **M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,
 `preflight`, `workflow_loader`, `prompt_renderer`, `reload`, `workspace`, `hooks`,
-`linear_transport`, `linear_normalize`, `linear_client`, `agent_launcher`, `stream_parser`. Build
-the remaining PRs below in order, one PR each, leaving the repo green (see `CLAUDE.md`).
+`linear_transport`, `linear_normalize`, `linear_client`, `agent_launcher`, `stream_parser`,
+`turn_runner`, `agent_runner`, `orchestrator`. Build the remaining PRs below in order, one PR
+each, leaving the repo green (see `CLAUDE.md`).
 
 ## PR Breakdown
 

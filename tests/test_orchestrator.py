@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from symphony.agent_runner import AttemptResult
 from symphony.config import (
     AgentConfig,
@@ -1436,3 +1438,96 @@ def test_startup_cleanup_returns_zero_without_workspace_root(tmp_path: Path) -> 
         fetch_terminal_issues=lambda: [_issue(state="Done")],
     )
     assert removed == 0
+
+
+# --- structured logging context fields (SPEC §13.1, §17.6) ----------------------
+
+
+def test_dispatch_logs_carry_issue_context_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="symphony.orchestrator")
+    state = OrchestratorState()
+
+    dispatch_issue(
+        _issue("i-9", "ABC-9"),
+        state,
+        None,
+        workspace_root=Path("/ws"),
+        spawn_worker=lambda issue, attempt: object(),
+        schedule_retry=_SpyRetry(),
+        now=_clock,
+    )
+
+    assert "dispatch completed issue_id=i-9 issue_identifier=ABC-9" in caplog.text
+
+
+def test_spawn_failure_log_carries_issue_context_and_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="symphony.orchestrator")
+    state = OrchestratorState()
+
+    dispatch_issue(
+        _issue("i-9", "ABC-9"),
+        state,
+        None,
+        workspace_root=Path("/ws"),
+        spawn_worker=lambda issue, attempt: None,
+        schedule_retry=_SpyRetry(),
+        now=_clock,
+    )
+
+    assert "dispatch failed, retrying" in caplog.text
+    assert "issue_id=i-9 issue_identifier=ABC-9" in caplog.text
+    assert 'reason="failed to spawn agent"' in caplog.text
+
+
+def test_worker_exit_log_carries_session_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="symphony.orchestrator")
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+
+    on_worker_exit(
+        state,
+        "i-1",
+        _attempt_result(),
+        schedule_retry=_scheduler(_FakeTimers()),
+        now=_clock,
+    )
+
+    assert "worker exited" in caplog.text
+    assert "issue_id=i-1 issue_identifier=ABC-1 session_id=s1" in caplog.text
+    assert "outcome=completed" in caplog.text
+
+
+def test_retry_scheduled_log_carries_issue_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="symphony.orchestrator")
+    schedule = _scheduler(_FakeTimers())
+
+    schedule(OrchestratorState(), "i-1", 2, identifier="ABC-1", error="boom")
+
+    assert "retry scheduled" in caplog.text
+    assert "issue_id=i-1 issue_identifier=ABC-1 attempt=2 delay_ms=20000" in caplog.text
+
+
+def test_startup_cleanup_fetch_failure_is_operator_visible(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("WARNING", logger="symphony.orchestrator")
+
+    def fetch() -> list[Issue]:
+        raise LinearApiRequestError("tracker down")
+
+    removed = startup_terminal_workspace_cleanup(
+        config=_service_config(tmp_path),
+        fetch_terminal_issues=fetch,
+    )
+
+    assert removed == 0
+    assert "startup workspace cleanup skipped" in caplog.text
+    assert 'reason="terminal-issue fetch failed"' in caplog.text

@@ -22,16 +22,20 @@ algorithms.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
 from symphony.config import ServiceConfig
+from symphony.exceptions import TrackerError
 from symphony.models import (
     Issue,
     OrchestratorState,
+    RetryEntry,
     RunAttempt,
     RunAttemptPhase,
     RunningEntry,
@@ -44,6 +48,12 @@ __all__ = [
     "WorkerSpawner",
     "ScheduleRetry",
     "DispatchPolicy",
+    "RetryDelay",
+    "SetRetryTimer",
+    "CancelRetryTimer",
+    "CandidateFetcher",
+    "DispatchFn",
+    "RetryScheduler",
     "next_attempt",
     "is_running",
     "is_claimed",
@@ -56,6 +66,8 @@ __all__ = [
     "should_dispatch",
     "sort_for_dispatch",
     "dispatch_issue",
+    "compute_backoff_ms",
+    "on_retry_timer",
 ]
 
 # Opaque runtime handle for a spawned worker. The concrete task/process type is
@@ -363,3 +375,169 @@ def dispatch_issue(
     state.claimed.add(issue.id)
     state.retry_attempts.pop(issue.id, None)
     return state
+
+
+# --- Retry & backoff (SPEC §8.4, §16.6) ----------------------------------------
+
+_CONTINUATION_DELAY_MS = 1000
+"""Fixed delay for a continuation retry after a clean worker exit (SPEC §8.4)."""
+
+_FAILURE_BASE_DELAY_MS = 10000
+"""Base delay for failure-driven exponential backoff (SPEC §8.4)."""
+
+_MAX_BACKOFF_EXPONENT = 30
+"""Cap on the backoff power so the raw delay never overflows into huge ints; any
+configured ``max_retry_backoff_ms`` is reached far below this (SPEC §8.4)."""
+
+
+class RetryDelay(Enum):
+    """How a retry's delay is computed (SPEC §8.4).
+
+    ``CONTINUATION`` is the short fixed re-check after a clean worker exit;
+    ``FAILURE`` is the exponential backoff used for every error-driven retry.
+    """
+
+    CONTINUATION = "continuation"
+    FAILURE = "failure"
+
+
+# (issue_id, delay_ms) -> opaque timer handle that fires the retry when due.
+SetRetryTimer = Callable[[str, int], object]
+# Cancels a previously scheduled retry timer handle.
+CancelRetryTimer = Callable[[object], None]
+# Fetches the active dispatch candidates (``tracker.fetch_candidate_issues``).
+CandidateFetcher = Callable[[], Sequence[Issue]]
+# Dispatches an issue at a given attempt (``dispatch_issue`` with its seams bound).
+DispatchFn = Callable[[Issue, OrchestratorState, int | None], OrchestratorState]
+
+
+def _monotonic_ms() -> int:
+    """Monotonic clock in milliseconds for retry ``due_at_ms`` (SPEC §4.1.7)."""
+    return time.monotonic_ns() // 1_000_000
+
+
+def compute_backoff_ms(
+    attempt: int, *, delay_type: RetryDelay, max_retry_backoff_ms: int
+) -> int:
+    """Delay before a retry fires (SPEC §8.4).
+
+    Continuation retries use a fixed ``1000`` ms. Failure retries use
+    ``min(10000 * 2 ** (attempt - 1), max_retry_backoff_ms)``, so the very first
+    failure waits ``10000`` ms and each subsequent attempt doubles up to the cap.
+    """
+    if delay_type is RetryDelay.CONTINUATION:
+        return _CONTINUATION_DELAY_MS
+    exponent = min(max(attempt - 1, 0), _MAX_BACKOFF_EXPONENT)
+    # ``1 << exponent`` == ``2 ** exponent`` for exponent >= 0, and stays typed int.
+    raw_delay = _FAILURE_BASE_DELAY_MS * (1 << exponent)
+    return min(raw_delay, max_retry_backoff_ms)
+
+
+@dataclass(frozen=True, slots=True)
+class RetryScheduler:
+    """Creates and tracks retry timers, satisfying the ``ScheduleRetry`` seam.
+
+    Implements retry-entry creation (SPEC §8.4): it cancels any existing timer for
+    the issue, computes the backoff, arms a new timer through the injected runtime
+    seams, and records the :class:`~symphony.models.RetryEntry`. The issue is kept
+    claimed so a ``RetryQueued`` issue is never re-dispatched by a concurrent poll
+    tick (SPEC §7.1, §7.4) — this also pins down the terse spawn-failure path in
+    SPEC §16.4, which routes here without having claimed yet.
+
+    Attributes:
+        set_timer: Arms a timer for ``(issue_id, delay_ms)`` and returns a handle.
+        cancel_timer: Cancels a previously armed timer handle.
+        max_retry_backoff_ms: Cap for failure backoff (``agent.max_retry_backoff_ms``).
+        now_ms: Monotonic clock for ``due_at_ms`` (injectable for tests).
+    """
+
+    set_timer: SetRetryTimer
+    cancel_timer: CancelRetryTimer
+    max_retry_backoff_ms: int
+    now_ms: Callable[[], int] = _monotonic_ms
+
+    def __call__(
+        self,
+        state: OrchestratorState,
+        issue_id: str,
+        attempt: int,
+        *,
+        identifier: str,
+        error: str | None = None,
+        delay_type: RetryDelay = RetryDelay.FAILURE,
+    ) -> OrchestratorState:
+        """Schedule (or reschedule) the retry for ``issue_id`` (SPEC §8.4)."""
+        existing = state.retry_attempts.get(issue_id)
+        if existing is not None and existing.timer_handle is not None:
+            self.cancel_timer(existing.timer_handle)
+
+        delay_ms = compute_backoff_ms(
+            attempt,
+            delay_type=delay_type,
+            max_retry_backoff_ms=self.max_retry_backoff_ms,
+        )
+        handle = self.set_timer(issue_id, delay_ms)
+        state.retry_attempts[issue_id] = RetryEntry(
+            issue_id=issue_id,
+            identifier=identifier,
+            attempt=attempt,
+            due_at_ms=self.now_ms() + delay_ms,
+            timer_handle=handle,
+            error=error,
+        )
+        state.claimed.add(issue_id)
+        return state
+
+
+def on_retry_timer(
+    issue_id: str,
+    state: OrchestratorState,
+    *,
+    fetch_active_issue_candidates: CandidateFetcher,
+    dispatch: DispatchFn,
+    schedule_retry: ScheduleRetry,
+) -> OrchestratorState:
+    """Handle a fired retry timer for ``issue_id`` (SPEC §8.4, §16.6).
+
+    Pops the retry entry, then re-checks the tracker's active candidates: a failed
+    poll requeues; an absent issue (terminal or no longer active — candidates are
+    active-only) releases the claim; otherwise the issue is dispatched if a global
+    slot is free, or requeued with ``no available orchestrator slots``.
+
+    Args:
+        issue_id: The issue whose retry timer fired.
+        state: The authoritative orchestrator state (mutated in place).
+        fetch_active_issue_candidates: Active-candidate fetch seam (tracker).
+        dispatch: Bound dispatch seam (``dispatch_issue`` with its seams applied).
+        schedule_retry: Retry-scheduling seam for the requeue paths.
+    """
+    retry_entry = state.retry_attempts.pop(issue_id, None)
+    if retry_entry is None:
+        return state
+
+    try:
+        active_issues = fetch_active_issue_candidates()
+    except TrackerError:
+        return schedule_retry(
+            state,
+            issue_id,
+            retry_entry.attempt + 1,
+            identifier=retry_entry.identifier,
+            error="retry poll failed",
+        )
+
+    issue = next((c for c in active_issues if c.id == issue_id), None)
+    if issue is None:
+        state.claimed.discard(issue_id)
+        return state
+
+    if available_slots(state) <= 0:
+        return schedule_retry(
+            state,
+            issue_id,
+            retry_entry.attempt + 1,
+            identifier=issue.identifier,
+            error="no available orchestrator slots",
+        )
+
+    return dispatch(issue, state, retry_entry.attempt)

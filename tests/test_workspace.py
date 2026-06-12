@@ -13,6 +13,7 @@ from symphony.exceptions import (
 )
 from symphony.workspace import (
     ensure_workspace,
+    remove_workspace,
     validate_agent_cwd,
     validate_within_root,
     workspace_path_for,
@@ -130,3 +131,50 @@ def test_validate_agent_cwd_rejects_mismatch(tmp_path: Path) -> None:
     workspace = ensure_workspace("ABC-123", tmp_path)
     with pytest.raises(InvalidWorkspaceCwdError):
         validate_agent_cwd(tmp_path, workspace.path)
+
+
+# --- remove_workspace (§8.5, §8.6, §9.5 Invariant 2) --------------------------
+
+
+def test_remove_workspace_deletes_tree(tmp_path: Path) -> None:
+    ws = ensure_workspace("ABC-1", tmp_path).path
+    (ws / "nested").mkdir()
+    (ws / "nested" / "file.txt").write_text("x")
+
+    assert remove_workspace(ws, tmp_path) is True
+    assert not ws.exists()
+
+
+def test_remove_workspace_absent_is_noop(tmp_path: Path) -> None:
+    path = workspace_path_for("ABC-1", tmp_path)  # never created
+    assert remove_workspace(path, tmp_path) is False
+    assert not path.exists()
+
+
+def test_remove_workspace_refuses_path_outside_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outsider = tmp_path / "outside"
+    outsider.mkdir()
+    (outsider / "keep.txt").write_text("important")
+
+    with pytest.raises(InvalidWorkspacePathError):
+        remove_workspace(outsider, root)
+    assert outsider.exists()  # never touched
+
+
+def test_remove_workspace_refuses_root_itself(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    with pytest.raises(InvalidWorkspacePathError):
+        remove_workspace(root, root)
+    assert root.exists()
+
+
+def test_remove_workspace_returns_false_on_oserror(tmp_path: Path) -> None:
+    # A regular file at the workspace path makes rmtree raise; removal is
+    # best-effort, so it reports False rather than propagating the OSError.
+    path = tmp_path / "ABC-1"
+    path.write_text("not a directory")
+    assert remove_workspace(path, tmp_path) is False
+    assert path.exists()

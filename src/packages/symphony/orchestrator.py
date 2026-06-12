@@ -32,6 +32,7 @@ from typing import Protocol
 
 from symphony.config import ServiceConfig
 from symphony.exceptions import TrackerError
+from symphony.hooks import HookKind, run_hook
 from symphony.models import (
     Issue,
     OrchestratorState,
@@ -41,12 +42,14 @@ from symphony.models import (
     RunningEntry,
 )
 from symphony.normalization import normalize_label, normalize_state
-from symphony.workspace import workspace_path_for
+from symphony.workspace import remove_workspace, workspace_path_for
 
 __all__ = [
     "WorkerHandle",
     "WorkerSpawner",
     "ScheduleRetry",
+    "StopWorker",
+    "IssueStateRefresher",
     "DispatchPolicy",
     "RetryDelay",
     "SetRetryTimer",
@@ -68,6 +71,9 @@ __all__ = [
     "dispatch_issue",
     "compute_backoff_ms",
     "on_retry_timer",
+    "terminate_running_issue",
+    "reconcile_stalled_runs",
+    "reconcile_running_issues",
 ]
 
 # Opaque runtime handle for a spawned worker. The concrete task/process type is
@@ -90,10 +96,8 @@ class WorkerSpawner(Protocol):
 class ScheduleRetry(Protocol):
     """Schedules a retry for an issue and returns the updated state (SPEC §16.6).
 
-    Backoff timing, timer handling and worker-slot-exhaustion requeue are
-    defined in SPEC §8.4 and implemented in a later PR; :func:`dispatch_issue`
-    depends only on
-    this minimal contract for its spawn-failure path.
+    Backoff timing, timer handling and worker-slot-exhaustion requeue are defined
+    in SPEC §8.4; callers depend only on this minimal contract.
     """
 
     def __call__(
@@ -105,6 +109,28 @@ class ScheduleRetry(Protocol):
         identifier: str,
         error: str | None,
     ) -> OrchestratorState: ...
+
+
+class StopWorker(Protocol):
+    """Stops a running worker during reconciliation (SPEC §8.5).
+
+    Given the live :class:`~symphony.models.RunningEntry`, the runtime cancels the
+    worker task / kills the agent subprocess using its handles. The concrete
+    mechanism is wired with the event loop (M7); reconciliation only needs to
+    signal "stop this one".
+    """
+
+    def __call__(self, entry: RunningEntry) -> None: ...
+
+
+class IssueStateRefresher(Protocol):
+    """Fetches current tracker states for running issues (SPEC §11.1, §16.3).
+
+    Satisfied by ``LinearClient.fetch_issue_states_by_ids``; mirrors the agent
+    runner's same-named seam so reconciliation does not depend on the worker.
+    """
+
+    def fetch_issue_states_by_ids(self, issue_ids: Sequence[str]) -> list[Issue]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,3 +568,152 @@ def on_retry_timer(
         )
 
     return dispatch(issue, state, retry_entry.attempt)
+
+
+# --- Active-run reconciliation (SPEC §8.5, §16.3) ------------------------------
+
+
+def _stall_reference(entry: RunningEntry) -> datetime:
+    """The instant a running worker's stall clock is measured from (SPEC §8.5).
+
+    The last ``stream-json`` event timestamp if one has been seen, else the
+    attempt's ``started_at``.
+    """
+    session = entry.session
+    if session is not None and session.last_event_timestamp is not None:
+        return session.last_event_timestamp
+    return entry.run_attempt.started_at
+
+
+def terminate_running_issue(
+    state: OrchestratorState,
+    issue_id: str,
+    *,
+    cleanup_workspace: bool,
+    config: ServiceConfig,
+    stop_worker: StopWorker,
+) -> OrchestratorState:
+    """Stop a running worker and drop its claim (SPEC §8.5, §16.3).
+
+    Removes the issue from ``running``, stops the worker via the ``stop_worker``
+    seam, and releases the claim (the issue is terminal, non-active, or being
+    requeued by the caller). When ``cleanup_workspace`` is set, the ``before_remove``
+    hook runs (best-effort, §9.4) and the workspace directory is removed (§8.5);
+    otherwise the workspace is left in place for a later run.
+
+    A no-op if ``issue_id`` is not currently running.
+    """
+    entry = state.running.pop(issue_id, None)
+    if entry is None:
+        return state
+
+    stop_worker(entry)
+
+    if cleanup_workspace and config.workspace.root is not None:
+        workspace_path = entry.run_attempt.workspace_path
+        run_hook(HookKind.BEFORE_REMOVE, config.hooks, workspace_path)
+        remove_workspace(workspace_path, config.workspace.root)
+
+    state.claimed.discard(issue_id)
+    return state
+
+
+def reconcile_stalled_runs(
+    state: OrchestratorState,
+    *,
+    config: ServiceConfig,
+    stop_worker: StopWorker,
+    schedule_retry: ScheduleRetry,
+    now: Callable[[], datetime] = _utcnow,
+) -> OrchestratorState:
+    """Stall detection — SPEC §8.5 Part A.
+
+    For each running worker, if the time since its last ``stream-json`` event (or
+    its start, if none) exceeds ``claude.stall_timeout_ms``, stop the worker and
+    queue a failure retry — the issue is still active, just stuck. Disabled when
+    ``stall_timeout_ms <= 0``.
+    """
+    stall_timeout_ms = config.claude.stall_timeout_ms
+    if stall_timeout_ms <= 0:
+        return state
+
+    now_dt = now()
+    for issue_id, entry in list(state.running.items()):
+        elapsed_ms = (now_dt - _stall_reference(entry)).total_seconds() * 1000
+        if elapsed_ms <= stall_timeout_ms:
+            continue
+        identifier = entry.run_attempt.issue_identifier
+        attempt = next_attempt(entry.run_attempt.attempt)
+        state = terminate_running_issue(
+            state,
+            issue_id,
+            cleanup_workspace=False,
+            config=config,
+            stop_worker=stop_worker,
+        )
+        state = schedule_retry(
+            state, issue_id, attempt, identifier=identifier, error="worker stalled"
+        )
+    return state
+
+
+def reconcile_running_issues(
+    state: OrchestratorState,
+    *,
+    config: ServiceConfig,
+    tracker: IssueStateRefresher,
+    stop_worker: StopWorker,
+    schedule_retry: ScheduleRetry,
+    now: Callable[[], datetime] = _utcnow,
+) -> OrchestratorState:
+    """Reconcile active runs against the tracker — SPEC §8.5, §16.3.
+
+    Runs stall detection (Part A), then refreshes the tracker state of every
+    running issue (Part B): terminal issues are stopped and their workspace cleaned;
+    issues still active have their in-memory snapshot updated; issues that are
+    neither active nor terminal are stopped without workspace cleanup. A failed
+    state refresh keeps all workers running and is retried next tick.
+    """
+    state = reconcile_stalled_runs(
+        state,
+        config=config,
+        stop_worker=stop_worker,
+        schedule_retry=schedule_retry,
+        now=now,
+    )
+
+    running_ids = list(state.running.keys())
+    if not running_ids:
+        return state
+
+    try:
+        refreshed = tracker.fetch_issue_states_by_ids(running_ids)
+    except TrackerError:
+        return state  # keep workers running; try again next tick
+
+    active_states = {normalize_state(s) for s in config.tracker.active_states}
+    terminal_states = {normalize_state(s) for s in config.tracker.terminal_states}
+
+    for issue in refreshed:
+        issue_state = issue.normalized_state
+        if issue_state in terminal_states:
+            state = terminate_running_issue(
+                state,
+                issue.id,
+                cleanup_workspace=True,
+                config=config,
+                stop_worker=stop_worker,
+            )
+        elif issue_state in active_states:
+            entry = state.running.get(issue.id)
+            if entry is not None:
+                entry.issue = issue
+        else:
+            state = terminate_running_issue(
+                state,
+                issue.id,
+                cleanup_workspace=False,
+                config=config,
+                stop_worker=stop_worker,
+            )
+    return state

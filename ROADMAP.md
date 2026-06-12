@@ -64,12 +64,14 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
   - ✅ PR 16 — Turn lifecycle + outcome + timeouts (`turn_runner.py`, §10.2, 10.6) — merged
   - ✅ PR 17 — Continuation (`--resume`) + Agent Runner contract (`agent_runner.py`, §10.7, 16.5)
     — merged; completes M4
-- **M5 — in progress** (§7, §8, §16):
+- **M5 — complete** (§7, §8, §16):
   - ✅ PR 18 — State + claim/dispatch primitives (`orchestrator.py`, §16.4) — merged
   - ✅ PR 19 — Candidate selection + sorting + concurrency (`orchestrator.py`, §8.2-8.3) — merged
   - ✅ PR 20 — Retry & backoff (`orchestrator.py`, §8.4, §16.6) — merged
-  - 🔄 PR 21 — Reconciliation: stall detection + tracker refresh (`orchestrator.py`,
-    `workspace.py`, §8.5, §16.3) — open PR
+  - ✅ PR 21 — Reconciliation: stall detection + tracker refresh (`orchestrator.py`,
+    `workspace.py`, §8.5, §16.3) — merged
+  - 🔄 PR 22 — Poll tick + worker-exit accounting + startup cleanup (`orchestrator.py`,
+    §8.1, §8.6, §13.5, §16.2) — open PR; completes M5
 - **M6–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,

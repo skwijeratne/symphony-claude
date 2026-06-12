@@ -1,18 +1,22 @@
-"""Orchestrator state primitives and single-issue dispatch (SPEC §7, §16.4).
+"""Orchestrator core: scheduling, dispatch, retry, reconciliation (SPEC §7, §8, §16).
 
 The orchestrator is the only component that mutates scheduling state; all worker
 outcomes are reported back to it and converted into explicit state transitions
-(SPEC §7). This module provides:
+(SPEC §7). This module provides, bottom-up:
 
-- the claim / running bookkeeping primitives that guard against duplicate
-  dispatch (SPEC §7.1, §7.4), and
-- ``dispatch_issue`` (SPEC §16.4), which spawns a worker for one issue and records
-  the resulting claim/running state.
+- claim / running bookkeeping primitives that guard against duplicate dispatch
+  (SPEC §7.1, §7.4),
+- candidate selection, sorting, and concurrency (SPEC §8.2-8.3),
+- ``dispatch_issue`` (SPEC §16.4), retry/backoff (SPEC §8.4, §16.6), and active-run
+  reconciliation (SPEC §8.5, §16.3), and
+- the poll-and-dispatch tick, worker-exit accounting, and startup cleanup that
+  compose them (SPEC §8.1, §8.6, §13.5, §16.2).
 
-Candidate selection and sorting (§8.2-8.3), retry/backoff (§8.4, §16.6),
-reconciliation (§8.5, §16.3) and the full poll tick (§8.1, §16.2) land in later
-PRs; this module exposes the seams they plug into (``WorkerSpawner`` and
-``ScheduleRetry``).
+Everything the runtime supplies — spawning/stopping workers, arming timers,
+tracker calls, observer notifications, the clock — is an injected seam
+(``WorkerSpawner``, ``StopWorker``, ``RetryScheduler``, ``IssueStateRefresher``,
+…), so the algorithms here are deterministic and unit-tested without a real event
+loop. Wiring those seams to the concrete runtime is M7.
 
 State mutations are applied in place on the single authoritative
 :class:`~symphony.models.OrchestratorState` and the same instance is returned, so
@@ -30,8 +34,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from symphony.agent_runner import AttemptResult
 from symphony.config import ServiceConfig
-from symphony.exceptions import TrackerError
+from symphony.exceptions import InvalidWorkspacePathError, TrackerError
 from symphony.hooks import HookKind, run_hook
 from symphony.models import (
     Issue,
@@ -74,6 +79,12 @@ __all__ = [
     "terminate_running_issue",
     "reconcile_stalled_runs",
     "reconcile_running_issues",
+    "Reconcile",
+    "ValidateDispatch",
+    "NotifyObservers",
+    "run_tick",
+    "on_worker_exit",
+    "startup_terminal_workspace_cleanup",
 ]
 
 # Opaque runtime handle for a spawned worker. The concrete task/process type is
@@ -719,3 +730,182 @@ def reconcile_running_issues(
                 stop_worker=stop_worker,
             )
     return state
+
+
+# --- Poll-and-dispatch tick (SPEC §8.1, §16.2) ---------------------------------
+
+# Reconcile active runs and return the updated state (`reconcile_running_issues`
+# with its seams bound).
+Reconcile = Callable[[OrchestratorState], OrchestratorState]
+# Per-tick dispatch preflight (SPEC §6.3); ``True`` when dispatch may proceed.
+ValidateDispatch = Callable[[], bool]
+# Notifies observability/status consumers of a state change (SPEC §8.1 step 6).
+NotifyObservers = Callable[[OrchestratorState], None]
+
+
+def run_tick(
+    state: OrchestratorState,
+    *,
+    policy: DispatchPolicy,
+    reconcile: Reconcile,
+    validate: ValidateDispatch,
+    fetch_active_issue_candidates: CandidateFetcher,
+    dispatch: DispatchFn,
+    notify: NotifyObservers | None = None,
+) -> OrchestratorState:
+    """Run one poll-and-dispatch tick (SPEC §8.1, §16.2).
+
+    The sequence is fixed: reconcile running issues first, then validate dispatch
+    config, fetch candidates, and dispatch the eligible ones in priority order
+    until the worker slots run out. Reconciliation happens on every tick; a failed
+    validation or candidate fetch skips dispatch for this tick only. Scheduling the
+    next tick is the event loop's job (M7).
+
+    Args:
+        state: The authoritative orchestrator state (mutated in place).
+        policy: Precomputed selection criteria, shared with reconciliation.
+        reconcile: Active-run reconciliation seam (SPEC §16.3).
+        validate: Per-tick dispatch preflight (SPEC §6.3); ``False`` skips dispatch.
+        fetch_active_issue_candidates: Active-candidate fetch seam (tracker).
+        dispatch: First-dispatch seam (``dispatch_issue`` with its seams bound).
+        notify: Optional observer-notification seam.
+    """
+    state = reconcile(state)
+
+    if not validate():
+        _notify(notify, state)
+        return state
+
+    try:
+        candidates = fetch_active_issue_candidates()
+    except TrackerError:
+        _notify(notify, state)
+        return state
+
+    for issue in sort_for_dispatch(candidates):
+        if available_worker_slots(state) <= 0:
+            break
+        if should_dispatch(issue, state, policy):
+            state = dispatch(issue, state, None)
+
+    _notify(notify, state)
+    return state
+
+
+def _notify(notify: NotifyObservers | None, state: OrchestratorState) -> None:
+    if notify is not None:
+        notify(state)
+
+
+# --- Worker exit + accounting (SPEC §13.5, §16.6) ------------------------------
+
+
+def on_worker_exit(
+    state: OrchestratorState,
+    issue_id: str,
+    result: AttemptResult,
+    *,
+    schedule_retry: RetryScheduler,
+    now: Callable[[], datetime] = _utcnow,
+    notify: NotifyObservers | None = None,
+) -> OrchestratorState:
+    """Fold a finished worker back into state (SPEC §13.5, §16.6).
+
+    Removes the running entry, accumulates its runtime and token/cost totals into
+    ``agent_totals`` (SPEC §13.5), and schedules a follow-up retry: a clean exit
+    queues a short *continuation* retry (attempt ``1``) to re-check whether the
+    issue still needs work, while a failed attempt queues an exponential-backoff
+    retry at the next attempt number (SPEC §7.3, §16.6).
+
+    A no-op if ``issue_id`` is not running (for example it was already terminated
+    by reconciliation).
+    """
+    entry = state.running.pop(issue_id, None)
+    if entry is None:
+        return state
+
+    _accumulate_totals(state, entry, result, now())
+    identifier = entry.run_attempt.issue_identifier
+
+    if result.succeeded:
+        state.completed.add(issue_id)
+        schedule_retry(
+            state,
+            issue_id,
+            1,
+            identifier=identifier,
+            delay_type=RetryDelay.CONTINUATION,
+        )
+    else:
+        schedule_retry(
+            state,
+            issue_id,
+            next_attempt(entry.run_attempt.attempt),
+            identifier=identifier,
+            error=f"worker exited: {result.error}",
+            delay_type=RetryDelay.FAILURE,
+        )
+
+    _notify(notify, state)
+    return state
+
+
+def _accumulate_totals(
+    state: OrchestratorState,
+    entry: RunningEntry,
+    result: AttemptResult,
+    now_dt: datetime,
+) -> None:
+    """Add one finished attempt's runtime and tokens to ``agent_totals`` (§13.5)."""
+    totals = state.agent_totals
+    elapsed_s = (now_dt - entry.run_attempt.started_at).total_seconds()
+    totals.runtime_seconds += max(elapsed_s, 0.0)
+    totals.input_tokens += result.input_tokens
+    totals.output_tokens += result.output_tokens
+    totals.total_tokens += result.total_tokens
+    if result.cost_usd is not None:
+        totals.total_cost_usd += result.cost_usd
+
+
+# --- Startup terminal-workspace cleanup (SPEC §8.6) ----------------------------
+
+
+def startup_terminal_workspace_cleanup(
+    *,
+    config: ServiceConfig,
+    fetch_terminal_issues: CandidateFetcher,
+) -> int:
+    """Remove stale workspaces for terminal issues at startup (SPEC §8.6).
+
+    Queries the tracker for issues in terminal states and removes each one's
+    workspace directory, so workspaces for already-finished issues do not pile up
+    across restarts. Best-effort throughout: a failed fetch logs nothing here and
+    simply continues (returns 0), a missing workspace is skipped, and an identifier
+    that would escape the root is ignored rather than risking a bad delete.
+
+    Args:
+        config: The resolved service configuration (workspace root).
+        fetch_terminal_issues: Seam returning the tracker's terminal-state issues
+            (``tracker.fetch_issues_by_states(terminal_states)`` bound).
+
+    Returns:
+        The number of workspace directories removed.
+    """
+    root = config.workspace.root
+    if root is None:
+        return 0
+
+    try:
+        issues = fetch_terminal_issues()
+    except TrackerError:
+        return 0  # warn + continue (logging arrives in M6)
+
+    removed = 0
+    for issue in issues:
+        try:
+            path = workspace_path_for(issue.identifier, root)
+        except InvalidWorkspacePathError:
+            continue
+        if remove_workspace(path, root):
+            removed += 1
+    return removed

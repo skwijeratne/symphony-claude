@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from symphony.agent_runner import AttemptResult
 from symphony.config import (
     AgentConfig,
     ClaudeConfig,
@@ -39,13 +40,16 @@ from symphony.orchestrator import (
     mark_completed,
     next_attempt,
     on_retry_timer,
+    on_worker_exit,
     per_state_available_worker_slots,
     reconcile_running_issues,
     reconcile_stalled_runs,
     release,
+    run_tick,
     running_count_for_state,
     should_dispatch,
     sort_for_dispatch,
+    startup_terminal_workspace_cleanup,
     terminate_running_issue,
 )
 from symphony.workspace import ensure_workspace, workspace_path_for
@@ -1111,3 +1115,324 @@ def test_reconcile_ignores_refreshed_issue_not_in_running(tmp_path: Path) -> Non
 
     assert is_running(state, "i-1")
     assert not is_running(state, "ghost")
+
+
+# --- run_tick: poll-and-dispatch sequence (SPEC §8.1, §16.2) -------------------
+
+
+class _DispatchSpy:
+    """Records dispatched issues and consumes a worker slot each time."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+
+    def __call__(
+        self, issue: Issue, state: OrchestratorState, attempt: int | None
+    ) -> OrchestratorState:
+        self.calls.append((issue.id, attempt))
+        _running(state, issue)  # occupy a slot
+        state.claimed.add(issue.id)
+        return state
+
+
+def _ip(issue_id: str, identifier: str, *, priority: int | None = None) -> Issue:
+    return _issue(issue_id, identifier, state="In Progress", priority=priority)
+
+
+def test_run_tick_reconciles_then_dispatches_eligible_in_order() -> None:
+    state = OrchestratorState(max_concurrent_agents=5)
+    order: list[str] = []
+    dispatch = _DispatchSpy()
+    candidates = [
+        _ip("i-3", "ABC-3", priority=3),
+        _ip("i-1", "ABC-1", priority=1),
+        _ip("i-2", "ABC-2", priority=2),
+    ]
+
+    def reconcile(s: OrchestratorState) -> OrchestratorState:
+        order.append("reconcile")
+        return s
+
+    def validate() -> bool:
+        order.append("validate")
+        return True
+
+    def fetch() -> list[Issue]:
+        order.append("fetch")
+        return candidates
+
+    run_tick(
+        state,
+        policy=_policy(),
+        reconcile=reconcile,
+        validate=validate,
+        fetch_active_issue_candidates=fetch,
+        dispatch=dispatch,
+        notify=lambda s: order.append("notify"),
+    )
+
+    assert order == ["reconcile", "validate", "fetch", "notify"]
+    # Dispatched in priority order (1, 2, 3).
+    assert dispatch.calls == [("i-1", None), ("i-2", None), ("i-3", None)]
+
+
+def test_run_tick_skips_dispatch_when_validation_fails() -> None:
+    state = OrchestratorState()
+    dispatch = _DispatchSpy()
+    fetched = False
+
+    def fetch() -> list[Issue]:
+        nonlocal fetched
+        fetched = True
+        return []
+
+    reconciled = False
+
+    def reconcile(s: OrchestratorState) -> OrchestratorState:
+        nonlocal reconciled
+        reconciled = True
+        return s
+
+    notified: list[bool] = []
+    run_tick(
+        state,
+        policy=_policy(),
+        reconcile=reconcile,
+        validate=lambda: False,
+        fetch_active_issue_candidates=fetch,
+        dispatch=dispatch,
+        notify=lambda s: notified.append(True),
+    )
+
+    assert reconciled  # reconciliation always runs
+    assert not fetched  # but dispatch (incl. fetch) is skipped
+    assert dispatch.calls == []
+    assert notified == [True]
+
+
+def test_run_tick_skips_dispatch_on_candidate_fetch_failure() -> None:
+    state = OrchestratorState()
+    dispatch = _DispatchSpy()
+
+    def fetch() -> list[Issue]:
+        raise LinearApiRequestError("tracker down")
+
+    run_tick(
+        state,
+        policy=_policy(),
+        reconcile=lambda s: s,
+        validate=lambda: True,
+        fetch_active_issue_candidates=fetch,
+        dispatch=dispatch,
+    )
+
+    assert dispatch.calls == []
+
+
+def test_run_tick_stops_dispatch_when_slots_exhausted() -> None:
+    state = OrchestratorState(max_concurrent_agents=2)
+    dispatch = _DispatchSpy()
+    candidates = [_ip(f"i-{n}", f"ABC-{n}") for n in range(4)]
+
+    run_tick(
+        state,
+        policy=_policy(),
+        reconcile=lambda s: s,
+        validate=lambda: True,
+        fetch_active_issue_candidates=lambda: candidates,
+        dispatch=dispatch,
+    )
+
+    assert len(dispatch.calls) == 2  # only two slots
+
+
+def test_run_tick_dispatches_only_eligible_candidates() -> None:
+    state = OrchestratorState(max_concurrent_agents=5)
+    dispatch = _DispatchSpy()
+    candidates = [
+        _ip("i-1", "ABC-1"),
+        _issue("i-2", "ABC-2", state="Done"),  # terminal -> not eligible
+        _issue("i-3", "ABC-3", state="Backlog"),  # not active -> not eligible
+    ]
+
+    run_tick(
+        state,
+        policy=_policy(active_states=["Todo", "In Progress"]),
+        reconcile=lambda s: s,
+        validate=lambda: True,
+        fetch_active_issue_candidates=lambda: candidates,
+        dispatch=dispatch,
+    )
+
+    assert dispatch.calls == [("i-1", None)]
+
+
+# --- on_worker_exit: accounting + retry (SPEC §13.5, §16.6) --------------------
+
+
+def _attempt_result(
+    *,
+    error: object = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float | None = None,
+) -> AttemptResult:
+    return AttemptResult(
+        error=error,  # type: ignore[arg-type]
+        session_id="s1",
+        turns=1,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+        final_state="In Progress",
+    )
+
+
+def test_worker_exit_success_accounts_and_schedules_continuation() -> None:
+    state = OrchestratorState()
+    _run_entry(
+        state,
+        _issue(state="In Progress"),
+        started_at=_FIXED_NOW - timedelta(seconds=30),
+    )
+    timers = _FakeTimers()
+    result = _attempt_result(
+        input_tokens=100, output_tokens=40, total_tokens=140, cost_usd=0.5
+    )
+
+    on_worker_exit(
+        state,
+        "i-1",
+        result,
+        schedule_retry=_scheduler(timers),
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert not is_running(state, "i-1")
+    assert "i-1" in state.completed
+    # Continuation retry: fixed 1000 ms timer, attempt 1.
+    assert timers.armed == [("i-1", 1000)]
+    assert state.retry_attempts["i-1"].attempt == 1
+    # Accounting folded into agent_totals.
+    totals = state.agent_totals
+    assert totals.input_tokens == 100
+    assert totals.output_tokens == 40
+    assert totals.total_tokens == 140
+    assert totals.total_cost_usd == 0.5
+    assert totals.runtime_seconds == 30.0
+
+
+def test_worker_exit_failure_schedules_backoff_retry() -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"), attempt=1)
+    timers = _FakeTimers()
+    result = _attempt_result(error=LinearApiRequestError("boom"))
+
+    on_worker_exit(
+        state,
+        "i-1",
+        result,
+        schedule_retry=_scheduler(timers),
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert "i-1" not in state.completed
+    entry = state.retry_attempts["i-1"]
+    assert entry.attempt == 2  # next_attempt(1)
+    assert entry.error is not None and entry.error.startswith("worker exited:")
+    assert timers.armed == [("i-1", 20000)]  # failure backoff for attempt 2
+
+
+def test_worker_exit_cost_none_leaves_cost_total_unchanged() -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+
+    on_worker_exit(
+        state,
+        "i-1",
+        _attempt_result(total_tokens=5, cost_usd=None),
+        schedule_retry=_scheduler(_FakeTimers()),
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert state.agent_totals.total_cost_usd == 0.0
+    assert state.agent_totals.total_tokens == 5
+
+
+def test_worker_exit_is_noop_when_not_running() -> None:
+    state = OrchestratorState()
+    timers = _FakeTimers()
+
+    on_worker_exit(
+        state,
+        "missing",
+        _attempt_result(),
+        schedule_retry=_scheduler(timers),
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert timers.armed == []
+    assert state.retry_attempts == {}
+
+
+# --- startup_terminal_workspace_cleanup (SPEC §8.6) ---------------------------
+
+
+def test_startup_cleanup_removes_terminal_workspaces(tmp_path: Path) -> None:
+    ws1 = ensure_workspace("ABC-1", tmp_path).path
+    ws2 = ensure_workspace("ABC-2", tmp_path).path
+    issues = [
+        _issue("i-1", "ABC-1", state="Done"),
+        _issue("i-2", "ABC-2", state="Done"),
+    ]
+
+    removed = startup_terminal_workspace_cleanup(
+        config=_service_config(tmp_path),
+        fetch_terminal_issues=lambda: issues,
+    )
+
+    assert removed == 2
+    assert not ws1.exists()
+    assert not ws2.exists()
+
+
+def test_startup_cleanup_skips_missing_and_bad_identifiers(tmp_path: Path) -> None:
+    ws = ensure_workspace("ABC-1", tmp_path).path
+    issues = [
+        _issue("i-1", "ABC-1", state="Done"),  # exists -> removed
+        _issue("i-2", "ABC-2", state="Done"),  # workspace never created -> skipped
+        _issue("i-3", "..", state="Done"),  # escaping identifier -> skipped, no crash
+    ]
+
+    removed = startup_terminal_workspace_cleanup(
+        config=_service_config(tmp_path),
+        fetch_terminal_issues=lambda: issues,
+    )
+
+    assert removed == 1
+    assert not ws.exists()
+
+
+def test_startup_cleanup_returns_zero_on_fetch_failure(tmp_path: Path) -> None:
+    ws = ensure_workspace("ABC-1", tmp_path).path
+
+    def fetch() -> list[Issue]:
+        raise LinearApiRequestError("tracker down")
+
+    removed = startup_terminal_workspace_cleanup(
+        config=_service_config(tmp_path),
+        fetch_terminal_issues=fetch,
+    )
+
+    assert removed == 0
+    assert ws.exists()  # nothing removed
+
+
+def test_startup_cleanup_returns_zero_without_workspace_root(tmp_path: Path) -> None:
+    removed = startup_terminal_workspace_cleanup(
+        config=_service_config(tmp_path, no_root=True),
+        fetch_terminal_issues=lambda: [_issue(state="Done")],
+    )
+    assert removed == 0

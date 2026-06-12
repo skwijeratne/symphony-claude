@@ -661,6 +661,7 @@ def reconcile_running_issues(
     state: OrchestratorState,
     *,
     config: ServiceConfig,
+    policy: DispatchPolicy,
     tracker: IssueStateRefresher,
     stop_worker: StopWorker,
     schedule_retry: ScheduleRetry,
@@ -673,6 +674,10 @@ def reconcile_running_issues(
     issues still active have their in-memory snapshot updated; issues that are
     neither active nor terminal are stopped without workspace cleanup. A failed
     state refresh keeps all workers running and is retried next tick.
+
+    ``policy`` supplies the same normalized active/terminal state sets the poll
+    tick already built for dispatch (:class:`DispatchPolicy`), so both decisions
+    share one definition of "active"/"terminal" rather than re-deriving it here.
     """
     state = reconcile_stalled_runs(
         state,
@@ -691,12 +696,9 @@ def reconcile_running_issues(
     except TrackerError:
         return state  # keep workers running; try again next tick
 
-    active_states = {normalize_state(s) for s in config.tracker.active_states}
-    terminal_states = {normalize_state(s) for s in config.tracker.terminal_states}
-
     for issue in refreshed:
         issue_state = issue.normalized_state
-        if issue_state in terminal_states:
+        if issue_state in policy.terminal_states:
             state = terminate_running_issue(
                 state,
                 issue.id,
@@ -704,7 +706,7 @@ def reconcile_running_issues(
                 config=config,
                 stop_worker=stop_worker,
             )
-        elif issue_state in active_states:
+        elif issue_state in policy.active_states:
             entry = state.running.get(issue.id)
             if entry is not None:
                 entry.issue = issue

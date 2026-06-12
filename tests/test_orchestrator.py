@@ -1021,6 +1021,7 @@ def _reconcile(
     reconcile_running_issues(
         state,
         config=config,
+        policy=DispatchPolicy.from_config(config),
         tracker=refresher,
         stop_worker=stop,
         schedule_retry=_SpyRetry(),

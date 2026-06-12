@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from symphony.config import AgentConfig, ServiceConfig, TrackerConfig
+from symphony.exceptions import LinearApiRequestError
 from symphony.models import (
     BlockerRef,
     Issue,
@@ -16,14 +17,19 @@ from symphony.models import (
     RunningEntry,
 )
 from symphony.orchestrator import (
+    DispatchFn,
     DispatchPolicy,
+    RetryDelay,
+    RetryScheduler,
     available_slots,
     claim,
+    compute_backoff_ms,
     dispatch_issue,
     is_claimed,
     is_running,
     mark_completed,
     next_attempt,
+    on_retry_timer,
     per_state_available_slots,
     release,
     running_count_for_state,
@@ -498,3 +504,250 @@ def test_sort_places_missing_created_at_last_without_comparing_to_aware() -> Non
     ]
     ordered = [i.identifier for i in sort_for_dispatch(issues)]
     assert ordered == ["ABC-2", "ABC-1"]
+
+
+# --- compute_backoff_ms (SPEC §8.4) --------------------------------------------
+
+
+def test_backoff_continuation_is_fixed_one_second() -> None:
+    # Attempt number is irrelevant for continuation retries.
+    for attempt in (1, 2, 9):
+        assert (
+            compute_backoff_ms(
+                attempt,
+                delay_type=RetryDelay.CONTINUATION,
+                max_retry_backoff_ms=300000,
+            )
+            == 1000
+        )
+
+
+def test_backoff_failure_doubles_until_capped() -> None:
+    cap = 300000
+
+    def failure(attempt: int) -> int:
+        return compute_backoff_ms(
+            attempt, delay_type=RetryDelay.FAILURE, max_retry_backoff_ms=cap
+        )
+
+    assert failure(1) == 10000  # 10000 * 2^0
+    assert failure(2) == 20000  # 10000 * 2^1
+    assert failure(3) == 40000  # 10000 * 2^2
+    assert failure(5) == 160000  # 10000 * 2^4
+    assert failure(6) == cap  # 320000 -> capped at 300000
+    assert failure(100) == cap  # large attempt stays capped, no overflow
+
+
+# --- RetryScheduler (SPEC §8.4) ------------------------------------------------
+
+
+class _FakeTimers:
+    """Records armed/cancelled retry timers for assertions."""
+
+    def __init__(self) -> None:
+        self.armed: list[tuple[str, int]] = []
+        self.cancelled: list[object] = []
+        self._next = 0
+
+    def set(self, issue_id: str, delay_ms: int) -> object:
+        self.armed.append((issue_id, delay_ms))
+        handle = f"timer-{self._next}"
+        self._next += 1
+        return handle
+
+    def cancel(self, handle: object) -> None:
+        self.cancelled.append(handle)
+
+
+def _scheduler(timers: _FakeTimers, *, cap: int = 300000) -> RetryScheduler:
+    return RetryScheduler(
+        set_timer=timers.set,
+        cancel_timer=timers.cancel,
+        max_retry_backoff_ms=cap,
+        now_ms=lambda: 1_000,
+    )
+
+
+def test_retry_scheduler_records_entry_arms_timer_and_claims() -> None:
+    timers = _FakeTimers()
+    schedule = _scheduler(timers)
+    state = OrchestratorState()
+
+    schedule(state, "i-1", 2, identifier="ABC-1", error="boom")
+
+    assert timers.armed == [("i-1", 20000)]
+    entry = state.retry_attempts["i-1"]
+    assert entry.attempt == 2
+    assert entry.identifier == "ABC-1"
+    assert entry.error == "boom"
+    assert entry.due_at_ms == 1_000 + 20000
+    assert entry.timer_handle == "timer-0"
+    # A RetryQueued issue stays claimed so a concurrent tick can't re-dispatch it.
+    assert is_claimed(state, "i-1")
+
+
+def test_retry_scheduler_uses_monotonic_clock_by_default() -> None:
+    timers = _FakeTimers()
+    schedule = RetryScheduler(
+        set_timer=timers.set,
+        cancel_timer=timers.cancel,
+        max_retry_backoff_ms=300000,
+    )
+    state = OrchestratorState()
+
+    schedule(state, "i-1", 1, identifier="ABC-1", error="boom")
+
+    # due_at = monotonic_now (>= 0) + the 10s backoff, so it is at least 10000.
+    assert state.retry_attempts["i-1"].due_at_ms >= 10000
+
+
+def test_retry_scheduler_continuation_uses_one_second() -> None:
+    timers = _FakeTimers()
+    schedule = _scheduler(timers)
+    state = OrchestratorState()
+
+    schedule(state, "i-1", 1, identifier="ABC-1", delay_type=RetryDelay.CONTINUATION)
+
+    assert timers.armed == [("i-1", 1000)]
+    assert state.retry_attempts["i-1"].error is None
+
+
+def test_retry_scheduler_cancels_existing_timer_on_reschedule() -> None:
+    timers = _FakeTimers()
+    schedule = _scheduler(timers)
+    state = OrchestratorState()
+
+    schedule(state, "i-1", 1, identifier="ABC-1", error="first")
+    schedule(state, "i-1", 2, identifier="ABC-1", error="second")
+
+    assert timers.cancelled == ["timer-0"]  # the first timer was cancelled
+    assert state.retry_attempts["i-1"].timer_handle == "timer-1"
+    assert state.retry_attempts["i-1"].attempt == 2
+
+
+# --- on_retry_timer (SPEC §8.4, §16.6) -----------------------------------------
+
+
+def _dispatch_spy() -> tuple[list[tuple[str, int | None]], DispatchFn]:
+    calls: list[tuple[str, int | None]] = []
+
+    def dispatch(
+        issue: Issue, state: OrchestratorState, attempt: int | None
+    ) -> OrchestratorState:
+        calls.append((issue.id, attempt))
+        state.running[issue.id] = RunningEntry(
+            run_attempt=RunAttempt(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                workspace_path=Path("/ws") / issue.identifier,
+                started_at=_FIXED_NOW,
+            ),
+            issue=issue,
+        )
+        return state
+
+    return calls, dispatch
+
+
+def _queue_retry(state: OrchestratorState, issue_id: str, attempt: int) -> None:
+    state.retry_attempts[issue_id] = RetryEntry(
+        issue_id=issue_id, identifier="ABC-1", attempt=attempt, due_at_ms=0
+    )
+    state.claimed.add(issue_id)
+
+
+def test_on_retry_timer_missing_entry_is_noop() -> None:
+    state = OrchestratorState()
+    calls, dispatch = _dispatch_spy()
+
+    on_retry_timer(
+        "i-1",
+        state,
+        fetch_candidates=lambda: [],
+        dispatch=dispatch,
+        schedule_retry=_scheduler(_FakeTimers()),
+    )
+
+    assert calls == []
+    assert state.retry_attempts == {}
+
+
+def test_on_retry_timer_dispatches_eligible_issue_at_stored_attempt() -> None:
+    state = OrchestratorState(max_concurrent_agents=1)
+    _queue_retry(state, "i-1", attempt=2)
+    calls, dispatch = _dispatch_spy()
+    issue = _issue(state="In Progress")
+
+    on_retry_timer(
+        "i-1",
+        state,
+        fetch_candidates=lambda: [issue],
+        dispatch=dispatch,
+        schedule_retry=_scheduler(_FakeTimers()),
+    )
+
+    assert calls == [("i-1", 2)]  # re-dispatched at the retry's attempt
+    assert "i-1" not in state.retry_attempts
+
+
+def test_on_retry_timer_releases_claim_when_issue_absent() -> None:
+    state = OrchestratorState()
+    _queue_retry(state, "i-1", attempt=1)
+    calls, dispatch = _dispatch_spy()
+
+    on_retry_timer(
+        "i-1",
+        state,
+        fetch_candidates=lambda: [_issue("i-2", "ABC-2")],  # i-1 not a candidate
+        dispatch=dispatch,
+        schedule_retry=_scheduler(_FakeTimers()),
+    )
+
+    assert calls == []
+    assert not is_claimed(state, "i-1")  # claim released
+    assert "i-1" not in state.retry_attempts
+
+
+def test_on_retry_timer_requeues_when_no_slots() -> None:
+    state = OrchestratorState(max_concurrent_agents=1)
+    _running(state, _issue("i-busy", "ABC-9", state="In Progress"))  # fills the slot
+    _queue_retry(state, "i-1", attempt=2)
+    calls, dispatch = _dispatch_spy()
+    timers = _FakeTimers()
+
+    on_retry_timer(
+        "i-1",
+        state,
+        fetch_candidates=lambda: [_issue(state="In Progress")],
+        dispatch=dispatch,
+        schedule_retry=_scheduler(timers),
+    )
+
+    assert calls == []
+    requeued = state.retry_attempts["i-1"]
+    assert requeued.attempt == 3  # attempt + 1
+    assert requeued.error == "no available orchestrator slots"
+    assert timers.armed == [("i-1", 40000)]  # backoff for attempt 3
+
+
+def test_on_retry_timer_requeues_when_candidate_fetch_fails() -> None:
+    state = OrchestratorState(max_concurrent_agents=2)
+    _queue_retry(state, "i-1", attempt=1)
+    calls, dispatch = _dispatch_spy()
+    timers = _FakeTimers()
+
+    def failing_fetch() -> list[Issue]:
+        raise LinearApiRequestError("network down")
+
+    on_retry_timer(
+        "i-1",
+        state,
+        fetch_candidates=failing_fetch,
+        dispatch=dispatch,
+        schedule_retry=_scheduler(timers),
+    )
+
+    assert calls == []
+    requeued = state.retry_attempts["i-1"]
+    assert requeued.attempt == 2
+    assert requeued.error == "retry poll failed"

@@ -1164,8 +1164,8 @@ def test_run_tick_reconciles_then_dispatches_eligible_in_order() -> None:
     run_tick(
         state,
         policy=_policy(),
-        reconcile=reconcile,
-        validate=validate,
+        reconcile_issues=reconcile,
+        validate_dispatch_config=validate,
         fetch_active_issue_candidates=fetch,
         dispatch=dispatch,
         notify=lambda s: order.append("notify"),
@@ -1197,8 +1197,8 @@ def test_run_tick_skips_dispatch_when_validation_fails() -> None:
     run_tick(
         state,
         policy=_policy(),
-        reconcile=reconcile,
-        validate=lambda: False,
+        reconcile_issues=reconcile,
+        validate_dispatch_config=lambda: False,
         fetch_active_issue_candidates=fetch,
         dispatch=dispatch,
         notify=lambda s: notified.append(True),
@@ -1220,8 +1220,8 @@ def test_run_tick_skips_dispatch_on_candidate_fetch_failure() -> None:
     run_tick(
         state,
         policy=_policy(),
-        reconcile=lambda s: s,
-        validate=lambda: True,
+        reconcile_issues=lambda s: s,
+        validate_dispatch_config=lambda: True,
         fetch_active_issue_candidates=fetch,
         dispatch=dispatch,
     )
@@ -1237,8 +1237,8 @@ def test_run_tick_stops_dispatch_when_slots_exhausted() -> None:
     run_tick(
         state,
         policy=_policy(),
-        reconcile=lambda s: s,
-        validate=lambda: True,
+        reconcile_issues=lambda s: s,
+        validate_dispatch_config=lambda: True,
         fetch_active_issue_candidates=lambda: candidates,
         dispatch=dispatch,
     )
@@ -1258,8 +1258,8 @@ def test_run_tick_dispatches_only_eligible_candidates() -> None:
     run_tick(
         state,
         policy=_policy(active_states=["Todo", "In Progress"]),
-        reconcile=lambda s: s,
-        validate=lambda: True,
+        reconcile_issues=lambda s: s,
+        validate_dispatch_config=lambda: True,
         fetch_active_issue_candidates=lambda: candidates,
         dispatch=dispatch,
     )

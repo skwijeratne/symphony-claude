@@ -690,7 +690,7 @@ def reconcile_running_issues(
     tick already built for dispatch (:class:`DispatchPolicy`), so both decisions
     share one definition of "active"/"terminal" rather than re-deriving it here.
     """
-    state = reconcile_stalled_runs(
+    updated_state = reconcile_stalled_runs(
         state,
         config=config,
         stop_worker=stop_worker,
@@ -698,38 +698,38 @@ def reconcile_running_issues(
         now=now,
     )
 
-    running_ids = list(state.running.keys())
+    running_ids = list(updated_state.running.keys())
     if not running_ids:
-        return state
+        return updated_state
 
     try:
-        refreshed = tracker.fetch_issue_states_by_ids(running_ids)
+        refreshed_issues = tracker.fetch_issue_states_by_ids(running_ids)
     except TrackerError:
-        return state  # keep workers running; try again next tick
+        return updated_state  # keep workers running; try again next tick
 
-    for issue in refreshed:
+    for issue in refreshed_issues:
         issue_state = issue.normalized_state
         if issue_state in policy.terminal_states:
-            state = terminate_running_issue(
-                state,
+            updated_state = terminate_running_issue(
+                updated_state,
                 issue.id,
                 cleanup_workspace=True,
                 config=config,
                 stop_worker=stop_worker,
             )
         elif issue_state in policy.active_states:
-            entry = state.running.get(issue.id)
-            if entry is not None:
-                entry.issue = issue
+            worker_entry = updated_state.running.get(issue.id)
+            if worker_entry is not None:
+                worker_entry.issue = issue
         else:
-            state = terminate_running_issue(
-                state,
+            updated_state = terminate_running_issue(
+                updated_state,
                 issue.id,
                 cleanup_workspace=False,
                 config=config,
                 stop_worker=stop_worker,
             )
-    return state
+    return updated_state
 
 
 # --- Poll-and-dispatch tick (SPEC §8.1, §16.2) ---------------------------------
@@ -747,8 +747,8 @@ def run_tick(
     state: OrchestratorState,
     *,
     policy: DispatchPolicy,
-    reconcile: Reconcile,
-    validate: ValidateDispatch,
+    reconcile_issues: Reconcile,
+    validate_dispatch_config: ValidateDispatch,
     fetch_active_issue_candidates: CandidateFetcher,
     dispatch: DispatchFn,
     notify: NotifyObservers | None = None,
@@ -764,15 +764,16 @@ def run_tick(
     Args:
         state: The authoritative orchestrator state (mutated in place).
         policy: Precomputed selection criteria, shared with reconciliation.
-        reconcile: Active-run reconciliation seam (SPEC §16.3).
-        validate: Per-tick dispatch preflight (SPEC §6.3); ``False`` skips dispatch.
+        reconcile_issues: Active-run reconciliation seam (SPEC §16.3).
+        validate_dispatch_config: Per-tick dispatch preflight (SPEC §6.3);
+            ``False`` skips dispatch.
         fetch_active_issue_candidates: Active-candidate fetch seam (tracker).
         dispatch: First-dispatch seam (``dispatch_issue`` with its seams bound).
         notify: Optional observer-notification seam.
     """
-    state = reconcile(state)
+    state = reconcile_issues(state)
 
-    if not validate():
+    if not validate_dispatch_config():
         _notify(notify, state)
         return state
 

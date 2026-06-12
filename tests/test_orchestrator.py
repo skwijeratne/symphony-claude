@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from symphony.config import AgentConfig, ServiceConfig, TrackerConfig
+from symphony.config import (
+    AgentConfig,
+    ClaudeConfig,
+    HooksConfig,
+    ServiceConfig,
+    TrackerConfig,
+    WorkspaceConfig,
+)
 from symphony.exceptions import LinearApiRequestError
 from symphony.models import (
     BlockerRef,
     Issue,
+    LiveSession,
     OrchestratorState,
     RetryEntry,
     RunAttempt,
@@ -31,12 +40,15 @@ from symphony.orchestrator import (
     next_attempt,
     on_retry_timer,
     per_state_available_worker_slots,
+    reconcile_running_issues,
+    reconcile_stalled_runs,
     release,
     running_count_for_state,
     should_dispatch,
     sort_for_dispatch,
+    terminate_running_issue,
 )
-from symphony.workspace import workspace_path_for
+from symphony.workspace import ensure_workspace, workspace_path_for
 
 _FIXED_NOW = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 
@@ -753,3 +765,349 @@ def test_on_retry_timer_requeues_when_candidate_fetch_fails() -> None:
     requeued = state.retry_attempts["i-1"]
     assert requeued.attempt == 2
     assert requeued.error == "retry poll failed"
+
+
+# --- reconciliation helpers (SPEC §8.5, §16.3) ---------------------------------
+
+
+def _service_config(
+    tmp_path: Path,
+    *,
+    active: list[str] | None = None,
+    terminal: list[str] | None = None,
+    stall_timeout_ms: int = 300000,
+    before_remove: str | None = None,
+    no_root: bool = False,
+) -> ServiceConfig:
+    return ServiceConfig(
+        tracker=TrackerConfig(
+            active_states=active if active is not None else ["Todo", "In Progress"],
+            terminal_states=terminal if terminal is not None else ["Done", "Canceled"],
+        ),
+        workspace=WorkspaceConfig(root=None if no_root else tmp_path),
+        hooks=HooksConfig(before_remove=before_remove),
+        claude=ClaudeConfig(stall_timeout_ms=stall_timeout_ms),
+    )
+
+
+class _StopSpy:
+    """Records which running entries were asked to stop."""
+
+    def __init__(self) -> None:
+        self.stopped: list[str] = []
+
+    def __call__(self, entry: RunningEntry) -> None:
+        self.stopped.append(entry.run_attempt.issue_id)
+
+
+class _Refresher:
+    """Fake IssueStateRefresher returning fixed issues (or raising)."""
+
+    def __init__(self, issues: list[Issue], *, raises: bool = False) -> None:
+        self._issues = issues
+        self._raises = raises
+        self.calls: list[list[str]] = []
+
+    def fetch_issue_states_by_ids(self, issue_ids: Sequence[str]) -> list[Issue]:
+        self.calls.append(list(issue_ids))
+        if self._raises:
+            raise LinearApiRequestError("refresh boom")
+        return list(self._issues)
+
+
+def _run_entry(
+    state: OrchestratorState,
+    issue: Issue,
+    *,
+    started_at: datetime = _FIXED_NOW,
+    last_event: datetime | None = None,
+    attempt: int | None = None,
+    workspace_root: Path | None = None,
+) -> None:
+    workspace_path = (
+        workspace_path_for(issue.identifier, workspace_root)
+        if workspace_root is not None
+        else Path("/ws") / issue.identifier
+    )
+    session = LiveSession(session_id="s1", last_event_timestamp=last_event)
+    state.running[issue.id] = RunningEntry(
+        run_attempt=RunAttempt(
+            issue_id=issue.id,
+            issue_identifier=issue.identifier,
+            workspace_path=workspace_path,
+            started_at=started_at,
+            attempt=attempt,
+        ),
+        issue=issue,
+        session=session if last_event is not None else None,
+    )
+    state.claimed.add(issue.id)
+
+
+# --- terminate_running_issue ---------------------------------------------------
+
+
+def test_terminate_stops_worker_drops_running_and_releases_claim(
+    tmp_path: Path,
+) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+    stop = _StopSpy()
+
+    terminate_running_issue(
+        state,
+        "i-1",
+        cleanup_workspace=False,
+        config=_service_config(tmp_path),
+        stop_worker=stop,
+    )
+
+    assert stop.stopped == ["i-1"]
+    assert not is_running(state, "i-1")
+    assert not is_claimed(state, "i-1")
+
+
+def test_terminate_cleanup_runs_before_remove_then_removes_workspace(
+    tmp_path: Path,
+) -> None:
+    state = OrchestratorState()
+    ws = ensure_workspace("ABC-1", tmp_path).path
+    sentinel = tmp_path / "before_remove.ran"
+    _run_entry(state, _issue(), workspace_root=tmp_path)
+
+    terminate_running_issue(
+        state,
+        "i-1",
+        cleanup_workspace=True,
+        config=_service_config(tmp_path, before_remove=f"touch {sentinel}"),
+        stop_worker=_StopSpy(),
+    )
+
+    assert sentinel.exists()  # hook ran (while the workspace still existed)
+    assert not ws.exists()  # workspace removed afterwards
+
+
+def test_terminate_cleanup_skipped_when_no_workspace_root(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    ws = ensure_workspace("ABC-1", tmp_path).path
+    _run_entry(state, _issue(), workspace_root=tmp_path)
+
+    terminate_running_issue(
+        state,
+        "i-1",
+        cleanup_workspace=True,
+        config=_service_config(tmp_path, no_root=True),
+        stop_worker=_StopSpy(),
+    )
+
+    assert ws.exists()  # no root configured -> nothing removed
+    assert not is_running(state, "i-1")
+
+
+def test_terminate_is_noop_when_issue_not_running(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    stop = _StopSpy()
+
+    terminate_running_issue(
+        state,
+        "missing",
+        cleanup_workspace=True,
+        config=_service_config(tmp_path),
+        stop_worker=stop,
+    )
+
+    assert stop.stopped == []
+
+
+# --- reconcile_stalled_runs (Part A) -------------------------------------------
+
+
+def _past(ms: int) -> datetime:
+    return _FIXED_NOW - timedelta(milliseconds=ms)
+
+
+def test_stall_terminates_and_retries_when_idle_too_long(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"), started_at=_past(60000), attempt=1)
+    stop = _StopSpy()
+    retry = _SpyRetry()
+
+    reconcile_stalled_runs(
+        state,
+        config=_service_config(tmp_path, stall_timeout_ms=30000),
+        stop_worker=stop,
+        schedule_retry=retry,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert stop.stopped == ["i-1"]
+    assert not is_running(state, "i-1")
+    assert retry.calls == [
+        {
+            "issue_id": "i-1",
+            "attempt": 2,
+            "identifier": "ABC-1",
+            "error": "worker stalled",
+        }
+    ]
+
+
+def test_stall_measures_from_last_event_when_present(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    # Started long ago, but a stream event arrived recently -> not stalled.
+    _run_entry(
+        state,
+        _issue(state="In Progress"),
+        started_at=_past(60000),
+        last_event=_past(1000),
+    )
+    retry = _SpyRetry()
+
+    reconcile_stalled_runs(
+        state,
+        config=_service_config(tmp_path, stall_timeout_ms=30000),
+        stop_worker=_StopSpy(),
+        schedule_retry=retry,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert is_running(state, "i-1")
+    assert retry.calls == []
+
+
+def test_stall_ignores_fresh_workers(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"), started_at=_past(5000))
+    retry = _SpyRetry()
+
+    reconcile_stalled_runs(
+        state,
+        config=_service_config(tmp_path, stall_timeout_ms=30000),
+        stop_worker=_StopSpy(),
+        schedule_retry=retry,
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert is_running(state, "i-1")
+    assert retry.calls == []
+
+
+def test_stall_detection_disabled_when_timeout_non_positive(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"), started_at=_past(10_000_000))
+    stop = _StopSpy()
+
+    reconcile_stalled_runs(
+        state,
+        config=_service_config(tmp_path, stall_timeout_ms=0),
+        stop_worker=stop,
+        schedule_retry=_SpyRetry(),
+        now=lambda: _FIXED_NOW,
+    )
+
+    assert is_running(state, "i-1")
+    assert stop.stopped == []
+
+
+# --- reconcile_running_issues (Part B) -----------------------------------------
+
+
+def _reconcile(
+    state: OrchestratorState,
+    config: ServiceConfig,
+    refresher: _Refresher,
+    stop: _StopSpy,
+) -> None:
+    reconcile_running_issues(
+        state,
+        config=config,
+        policy=DispatchPolicy.from_config(config),
+        tracker=refresher,
+        stop_worker=stop,
+        schedule_retry=_SpyRetry(),
+        now=lambda: _FIXED_NOW,
+    )
+
+
+def test_reconcile_terminal_issue_stops_and_cleans_workspace(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    ws = ensure_workspace("ABC-1", tmp_path).path
+    _run_entry(state, _issue(state="In Progress"), workspace_root=tmp_path)
+    stop = _StopSpy()
+    refresher = _Refresher([_issue(state="Done")])
+
+    _reconcile(state, _service_config(tmp_path), refresher, stop)
+
+    assert refresher.calls == [["i-1"]]
+    assert stop.stopped == ["i-1"]
+    assert not is_running(state, "i-1")
+    assert not is_claimed(state, "i-1")
+    assert not ws.exists()
+
+
+def test_reconcile_active_issue_refreshes_snapshot(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+    updated = _issue(state="In Progress", title="Renamed")
+    stop = _StopSpy()
+
+    _reconcile(state, _service_config(tmp_path), _Refresher([updated]), stop)
+
+    assert is_running(state, "i-1")
+    assert stop.stopped == []
+    assert state.running["i-1"].issue is updated
+
+
+def test_reconcile_non_active_non_terminal_stops_without_cleanup(
+    tmp_path: Path,
+) -> None:
+    state = OrchestratorState()
+    ws = ensure_workspace("ABC-1", tmp_path).path
+    _run_entry(state, _issue(state="In Progress"), workspace_root=tmp_path)
+    stop = _StopSpy()
+    # "In Review" is neither active nor terminal in this config.
+    refresher = _Refresher([_issue(state="In Review")])
+
+    _reconcile(state, _service_config(tmp_path), refresher, stop)
+
+    assert stop.stopped == ["i-1"]
+    assert not is_running(state, "i-1")
+    assert not is_claimed(state, "i-1")
+    assert ws.exists()  # workspace preserved
+
+
+def test_reconcile_keeps_workers_running_on_refresh_failure(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+    stop = _StopSpy()
+
+    _reconcile(state, _service_config(tmp_path), _Refresher([], raises=True), stop)
+
+    assert is_running(state, "i-1")
+    assert stop.stopped == []
+
+
+def test_reconcile_skips_refresh_when_nothing_running(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    refresher = _Refresher([_issue(state="Done")])
+
+    _reconcile(state, _service_config(tmp_path), refresher, _StopSpy())
+
+    assert refresher.calls == []  # no running ids -> no tracker call
+
+
+def test_reconcile_ignores_refreshed_issue_not_in_running(tmp_path: Path) -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+    # Tracker echoes an extra id that is not tracked as running (defensive path).
+    refresher = _Refresher(
+        [
+            _issue("i-1", state="In Progress"),
+            _issue("ghost", "ZZ-9", state="In Progress"),
+        ]
+    )
+
+    _reconcile(state, _service_config(tmp_path), refresher, _StopSpy())
+
+    assert is_running(state, "i-1")
+    assert not is_running(state, "ghost")

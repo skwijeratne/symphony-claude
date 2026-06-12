@@ -27,6 +27,7 @@ PR) nor populate/sync the workspace contents (SPEC §9.3, implementation-defined
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 from symphony.exceptions import (
@@ -42,6 +43,7 @@ __all__ = [
     "ensure_workspace",
     "validate_within_root",
     "validate_agent_cwd",
+    "remove_workspace",
 ]
 
 
@@ -147,6 +149,37 @@ def ensure_workspace(identifier: str, root: Path) -> Workspace:
         ) from exc
 
     return Workspace(path=path, workspace_key=key, created_now=created_now)
+
+
+def remove_workspace(workspace_path: Path, root: Path) -> bool:
+    """Remove a per-issue workspace directory tree (SPEC §8.5, §8.6).
+
+    Used by reconciliation (terminal-state runs) and startup terminal cleanup to
+    discard stale workspaces. Containment is re-validated first (§9.5 Invariant 2)
+    so a bad path can never delete anything outside the workspace root, and removal
+    is best-effort: a missing directory or an ``OSError`` is swallowed rather than
+    failing the tick.
+
+    Args:
+        workspace_path: The per-issue workspace path to remove.
+        root: The configured workspace root (the deletion must stay inside it).
+
+    Returns:
+        ``True`` if a directory was removed, ``False`` if nothing was deleted
+        (already absent, or removal failed).
+
+    Raises:
+        InvalidWorkspacePathError: ``workspace_path`` escapes, or coincides with,
+            the root (§9.5) — the deletion is refused before touching the disk.
+    """
+    path = validate_within_root(workspace_path, root)
+    if not path.exists():
+        return False
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        return False
+    return True
 
 
 def validate_agent_cwd(cwd: Path, workspace_path: Path) -> None:

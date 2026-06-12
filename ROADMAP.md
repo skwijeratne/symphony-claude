@@ -67,7 +67,9 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
 - **M5 — in progress** (§7, §8, §16):
   - ✅ PR 18 — State + claim/dispatch primitives (`orchestrator.py`, §16.4) — merged
   - ✅ PR 19 — Candidate selection + sorting + concurrency (`orchestrator.py`, §8.2-8.3) — merged
-  - 🔄 PR 20 — Retry & backoff (`orchestrator.py`, §8.4, §16.6) — open PR
+  - ✅ PR 20 — Retry & backoff (`orchestrator.py`, §8.4, §16.6) — merged
+  - 🔄 PR 21 — Reconciliation: stall detection + tracker refresh (`orchestrator.py`,
+    `workspace.py`, §8.5, §16.3) — open PR
 - **M6–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,

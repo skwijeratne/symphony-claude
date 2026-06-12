@@ -26,6 +26,7 @@ algorithms.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from symphony.models import (
     RunningEntry,
 )
 from symphony.normalization import normalize_label, normalize_state
+from symphony.structured_logging import log_fields
 from symphony.workspace import remove_workspace, workspace_path_for
 
 __all__ = [
@@ -86,6 +88,8 @@ __all__ = [
     "on_worker_exit",
     "startup_terminal_workspace_cleanup",
 ]
+
+logger = logging.getLogger("symphony.orchestrator")
 
 # Opaque runtime handle for a spawned worker. The concrete task/process type is
 # decided when the service event loop is composed (M7); dispatch only stores it.
@@ -389,6 +393,15 @@ def dispatch_issue(
     """
     handle = spawn_worker(issue, attempt)
     if handle is None:
+        logger.warning(
+            "dispatch failed, retrying %s",
+            log_fields(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                attempt=attempt,
+                reason="failed to spawn agent",
+            ),
+        )
         return schedule_retry(
             state,
             issue.id,
@@ -412,6 +425,14 @@ def dispatch_issue(
     )
     state.claimed.add(issue.id)
     state.retry_attempts.pop(issue.id, None)
+    logger.info(
+        "dispatch completed %s",
+        log_fields(
+            issue_id=issue.id,
+            issue_identifier=issue.identifier,
+            attempt=attempt,
+        ),
+    )
     return state
 
 
@@ -514,6 +535,16 @@ class RetryScheduler:
             delay_type=delay_type,
             max_retry_backoff_ms=self.max_retry_backoff_ms,
         )
+        logger.info(
+            "retry scheduled %s",
+            log_fields(
+                issue_id=issue_id,
+                issue_identifier=identifier,
+                attempt=attempt,
+                delay_ms=delay_ms,
+                reason=error,
+            ),
+        )
         handle = self.set_timer(issue_id, delay_ms)
         state.retry_attempts[issue_id] = RetryEntry(
             issue_id=issue_id,
@@ -567,6 +598,14 @@ def on_retry_timer(
     issue = next((c for c in active_issues if c.id == issue_id), None)
     if issue is None:
         state.claimed.discard(issue_id)
+        logger.info(
+            "retry released %s",
+            log_fields(
+                issue_id=issue_id,
+                issue_identifier=retry_entry.identifier,
+                reason="issue no longer an active candidate",
+            ),
+        )
         return state
 
     if available_worker_slots(state) <= 0:
@@ -619,6 +658,15 @@ def terminate_running_issue(
         return state
 
     stop_worker(entry)
+    logger.info(
+        "running issue terminated %s",
+        log_fields(
+            issue_id=issue_id,
+            issue_identifier=entry.run_attempt.issue_identifier,
+            session_id=entry.session.session_id if entry.session else None,
+            cleanup_workspace=cleanup_workspace,
+        ),
+    )
 
     if cleanup_workspace and config.workspace.root is not None:
         workspace_path = entry.run_attempt.workspace_path
@@ -655,6 +703,16 @@ def reconcile_stalled_runs(
             continue
         identifier = entry.run_attempt.issue_identifier
         attempt = next_attempt(entry.run_attempt.attempt)
+        logger.warning(
+            "worker stalled, retrying %s",
+            log_fields(
+                issue_id=issue_id,
+                issue_identifier=identifier,
+                session_id=entry.session.session_id if entry.session else None,
+                elapsed_ms=int(elapsed_ms),
+                stall_timeout_ms=stall_timeout_ms,
+            ),
+        )
         state = terminate_running_issue(
             state,
             issue_id,
@@ -827,6 +885,18 @@ def on_worker_exit(
 
     _accumulate_totals(state, entry, result, now())
     identifier = entry.run_attempt.issue_identifier
+    logger.info(
+        "worker exited %s",
+        log_fields(
+            issue_id=issue_id,
+            issue_identifier=identifier,
+            session_id=result.session_id,
+            outcome="completed" if result.succeeded else "failed",
+            turns=result.turns,
+            total_tokens=result.total_tokens,
+            reason=result.error,
+        ),
+    )
 
     if result.succeeded:
         state.completed.add(issue_id)
@@ -898,8 +968,13 @@ def startup_terminal_workspace_cleanup(
 
     try:
         issues = fetch_terminal_issues()
-    except TrackerError:
-        return 0  # warn + continue (logging arrives in M6)
+    except TrackerError as error:
+        # Warn + continue: startup cleanup is best-effort (SPEC §8.6).
+        logger.warning(
+            "startup workspace cleanup skipped %s",
+            log_fields(reason="terminal-issue fetch failed", error=error),
+        )
+        return 0
 
     removed = 0
     for issue in issues:
@@ -909,4 +984,5 @@ def startup_terminal_workspace_cleanup(
             continue
         if remove_workspace(path, root):
             removed += 1
+    logger.info("startup workspace cleanup completed %s", log_fields(removed=removed))
     return removed

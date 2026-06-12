@@ -21,7 +21,7 @@ from symphony.orchestrator import (
     DispatchPolicy,
     RetryDelay,
     RetryScheduler,
-    available_slots,
+    available_worker_slots,
     claim,
     compute_backoff_ms,
     dispatch_issue,
@@ -30,7 +30,7 @@ from symphony.orchestrator import (
     mark_completed,
     next_attempt,
     on_retry_timer,
-    per_state_available_slots,
+    per_state_available_worker_slots,
     release,
     running_count_for_state,
     should_dispatch,
@@ -327,17 +327,17 @@ def test_dispatch_spawn_failure_escalates_existing_attempt(tmp_path: Path) -> No
     assert retry.calls[0]["attempt"] == 4
 
 
-# --- concurrency: global + per-state slots (SPEC §8.3) -------------------------
+# --- concurrency: global + per-state worker slots (SPEC §8.3) -------------------------
 
 
-def test_available_slots_floors_at_zero() -> None:
+def test_available_worker_slots_floors_at_zero() -> None:
     state = OrchestratorState(max_concurrent_agents=2)
-    assert available_slots(state) == 2
+    assert available_worker_slots(state) == 2
     _running(state, _issue("i-1", "ABC-1", state="In Progress"))
-    assert available_slots(state) == 1
+    assert available_worker_slots(state) == 1
     _running(state, _issue("i-2", "ABC-2", state="In Progress"))
     _running(state, _issue("i-3", "ABC-3", state="In Progress"))
-    assert available_slots(state) == 0  # never negative
+    assert available_worker_slots(state) == 0  # never negative
 
 
 def test_running_count_for_state_counts_by_tracked_state() -> None:
@@ -350,15 +350,15 @@ def test_running_count_for_state_counts_by_tracked_state() -> None:
     assert running_count_for_state(state, "Done") == 0
 
 
-def test_per_state_slots_use_override_then_fall_back_to_global() -> None:
+def test_per_state_worker_slots_use_override_then_fall_back_to_global() -> None:
     state = OrchestratorState(max_concurrent_agents=5)
     policy = _policy(by_state={"in progress": 1})
     # Override present for In Progress.
-    assert per_state_available_slots(state, policy, "In Progress") == 1
+    assert per_state_available_worker_slots(state, policy, "In Progress") == 1
     _running(state, _issue("i-1", "ABC-1", state="In Progress"))
-    assert per_state_available_slots(state, policy, "In Progress") == 0
+    assert per_state_available_worker_slots(state, policy, "In Progress") == 0
     # No override for Todo -> falls back to the global limit (minus Todo runners).
-    assert per_state_available_slots(state, policy, "Todo") == 5
+    assert per_state_available_worker_slots(state, policy, "Todo") == 5
 
 
 # --- DispatchPolicy: precomputed, normalized criteria (SPEC §8.2-8.3) ----------
@@ -425,14 +425,14 @@ def test_should_dispatch_rejects_running_or_claimed() -> None:
     assert not should_dispatch(_issue(), claimed_state, policy)
 
 
-def test_should_dispatch_rejects_when_no_global_slots() -> None:
+def test_should_dispatch_rejects_when_no_global_worker_slots() -> None:
     state = OrchestratorState(max_concurrent_agents=1)
     policy = _policy()
     _running(state, _issue("i-9", "ABC-9", state="In Progress"))
     assert not should_dispatch(_issue(), state, policy)
 
 
-def test_should_dispatch_rejects_when_per_state_slots_exhausted() -> None:
+def test_should_dispatch_rejects_when_per_state_worker_slots_exhausted() -> None:
     state = OrchestratorState(max_concurrent_agents=5)
     policy = _policy(by_state={"todo": 1})
     _running(state, _issue("i-9", "ABC-9", state="Todo"))
@@ -709,9 +709,10 @@ def test_on_retry_timer_releases_claim_when_issue_absent() -> None:
     assert "i-1" not in state.retry_attempts
 
 
-def test_on_retry_timer_requeues_when_no_slots() -> None:
+def test_on_retry_timer_requeues_when_no_worker_slots() -> None:
     state = OrchestratorState(max_concurrent_agents=1)
-    _running(state, _issue("i-busy", "ABC-9", state="In Progress"))  # fills the slot
+    # The only worker slot is already filled.
+    _running(state, _issue("i-busy", "ABC-9", state="In Progress"))
     _queue_retry(state, "i-1", attempt=2)
     calls, dispatch = _dispatch_spy()
     timers = _FakeTimers()

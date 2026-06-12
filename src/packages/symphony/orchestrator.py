@@ -60,9 +60,9 @@ __all__ = [
     "claim",
     "release",
     "mark_completed",
-    "available_slots",
+    "available_worker_slots",
     "running_count_for_state",
-    "per_state_available_slots",
+    "per_state_available_worker_slots",
     "should_dispatch",
     "sort_for_dispatch",
     "dispatch_issue",
@@ -90,8 +90,9 @@ class WorkerSpawner(Protocol):
 class ScheduleRetry(Protocol):
     """Schedules a retry for an issue and returns the updated state (SPEC §16.6).
 
-    Backoff timing, timer handling and slot-exhaustion requeue are defined in
-    SPEC §8.4 and implemented in a later PR; :func:`dispatch_issue` depends only on
+    Backoff timing, timer handling and worker-slot-exhaustion requeue are
+    defined in SPEC §8.4 and implemented in a later PR; :func:`dispatch_issue`
+    depends only on
     this minimal contract for its spawn-failure path.
     """
 
@@ -200,8 +201,8 @@ def mark_completed(state: OrchestratorState, issue_id: str) -> OrchestratorState
     return state
 
 
-def available_slots(state: OrchestratorState) -> int:
-    """Global concurrency slots still free (SPEC §8.3).
+def available_worker_slots(state: OrchestratorState) -> int:
+    """Global worker slots still free (SPEC §8.3).
 
     ``max(max_concurrent_agents - running_count, 0)``.
     """
@@ -222,10 +223,10 @@ def running_count_for_state(state: OrchestratorState, state_name: str) -> int:
     )
 
 
-def per_state_available_slots(
+def per_state_available_worker_slots(
     state: OrchestratorState, policy: DispatchPolicy, state_name: str
 ) -> int:
-    """Per-state concurrency slots still free for ``state_name`` (SPEC §8.3).
+    """Per-state worker slots still free for ``state_name`` (SPEC §8.3).
 
     Uses the policy's per-state override when present, otherwise falls back to the
     global limit.
@@ -258,7 +259,7 @@ def should_dispatch(
     """Whether ``issue`` is dispatch-eligible right now (SPEC §8.2).
 
     Checks identity, active/terminal state, required labels, the not-running and
-    not-claimed claim guards (SPEC §7.1), global and per-state concurrency slots,
+    not-claimed claim guards (SPEC §7.1), global and per-state worker slots,
     and the ``Todo`` blocker rule. ``policy`` carries the normalized criteria
     precomputed once per pass (:meth:`DispatchPolicy.from_config`), so this stays
     allocation-free across candidates.
@@ -280,9 +281,9 @@ def should_dispatch(
     if is_running(state, issue.id) or is_claimed(state, issue.id):
         return False
 
-    if available_slots(state) <= 0:
+    if available_worker_slots(state) <= 0:
         return False
-    if per_state_available_slots(state, policy, issue.state) <= 0:
+    if per_state_available_worker_slots(state, policy, issue.state) <= 0:
         return False
 
     # The blocker rule only applies to Todo issues (SPEC §8.2).
@@ -294,7 +295,7 @@ def _dispatch_sort_key(issue: Issue) -> tuple[bool, int, bool, datetime, str]:
 
     ``priority`` ascending (null last), then ``created_at`` oldest first (null
     last), then ``identifier`` lexicographically. The boolean null-flags guard the
-    value slots so the ``datetime.min`` placeholder is only ever compared against
+    value positions so the ``datetime.min`` placeholder is only ever compared against
     itself (never against a real, possibly tz-aware timestamp).
     """
     return (
@@ -326,7 +327,7 @@ def dispatch_issue(
 ) -> OrchestratorState:
     """Spawn a worker for ``issue`` and record the claim/running state (SPEC §16.4).
 
-    Eligibility (running/claimed/slot checks, SPEC §8.2-8.3) is the caller's
+    Eligibility (running/claimed/worker-slot checks, SPEC §8.2-8.3) is the caller's
     responsibility; this function performs the dispatch itself. On a spawn failure
     it routes to ``schedule_retry`` with the escalated attempt; on success it adds
     the running entry, claims the issue, and clears any pending retry.
@@ -502,7 +503,7 @@ def on_retry_timer(
     Pops the retry entry, then re-checks the tracker's active candidates: a failed
     poll requeues; an absent issue (terminal or no longer active — candidates are
     active-only) releases the claim; otherwise the issue is dispatched if a global
-    slot is free, or requeued with ``no available orchestrator slots``.
+    worker slot is free, or requeued with ``no available orchestrator slots``.
 
     Args:
         issue_id: The issue whose retry timer fired.
@@ -531,7 +532,7 @@ def on_retry_timer(
         state.claimed.discard(issue_id)
         return state
 
-    if available_slots(state) <= 0:
+    if available_worker_slots(state) <= 0:
         return schedule_retry(
             state,
             issue_id,

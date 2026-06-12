@@ -65,7 +65,8 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
   - ✅ PR 17 — Continuation (`--resume`) + Agent Runner contract (`agent_runner.py`, §10.7, 16.5)
     — merged; completes M4
 - **M5 — in progress** (§7, §8, §16):
-  - 🔄 PR 18 — State + claim/dispatch primitives (`orchestrator.py`, §16.4) — open PR
+  - ✅ PR 18 — State + claim/dispatch primitives (`orchestrator.py`, §16.4) — merged
+  - 🔄 PR 19 — Candidate selection + sorting + concurrency (`orchestrator.py`, §8.2-8.3) — open PR
 - **M6–M7 — not started.**
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,

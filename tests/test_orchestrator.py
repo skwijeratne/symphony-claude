@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from symphony.config import AgentConfig, ServiceConfig, TrackerConfig
 from symphony.models import (
+    BlockerRef,
     Issue,
     OrchestratorState,
     RetryEntry,
@@ -14,21 +16,83 @@ from symphony.models import (
     RunningEntry,
 )
 from symphony.orchestrator import (
+    DispatchPolicy,
+    available_slots,
     claim,
     dispatch_issue,
     is_claimed,
     is_running,
     mark_completed,
     next_attempt,
+    per_state_available_slots,
     release,
+    running_count_for_state,
+    should_dispatch,
+    sort_for_dispatch,
 )
 from symphony.workspace import workspace_path_for
 
 _FIXED_NOW = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 
 
-def _issue(issue_id: str = "i-1", identifier: str = "ABC-1") -> Issue:
-    return Issue(id=issue_id, identifier=identifier, title="Fix bug", state="Todo")
+def _issue(
+    issue_id: str = "i-1",
+    identifier: str = "ABC-1",
+    *,
+    state: str = "Todo",
+    title: str = "Fix bug",
+    labels: list[str] | None = None,
+    priority: int | None = None,
+    created_at: datetime | None = None,
+    blocked_by: list[BlockerRef] | None = None,
+) -> Issue:
+    return Issue(
+        id=issue_id,
+        identifier=identifier,
+        title=title,
+        state=state,
+        labels=labels if labels is not None else [],
+        priority=priority,
+        created_at=created_at,
+        blocked_by=blocked_by if blocked_by is not None else [],
+    )
+
+
+def _policy(
+    *,
+    required_labels: list[str] | None = None,
+    active_states: list[str] | None = None,
+    terminal_states: list[str] | None = None,
+    by_state: dict[str, int] | None = None,
+) -> DispatchPolicy:
+    config = ServiceConfig(
+        tracker=TrackerConfig(
+            required_labels=required_labels if required_labels is not None else [],
+            active_states=(
+                active_states if active_states is not None else ["Todo", "In Progress"]
+            ),
+            terminal_states=(
+                terminal_states if terminal_states is not None else ["Done", "Canceled"]
+            ),
+        ),
+        agent=AgentConfig(
+            max_concurrent_agents_by_state=by_state if by_state is not None else {},
+        ),
+    )
+    return DispatchPolicy.from_config(config)
+
+
+def _running(state: OrchestratorState, issue: Issue) -> None:
+    """Register ``issue`` as running for concurrency-count tests."""
+    state.running[issue.id] = RunningEntry(
+        run_attempt=RunAttempt(
+            issue_id=issue.id,
+            issue_identifier=issue.identifier,
+            workspace_path=Path("/ws") / issue.identifier,
+            started_at=_FIXED_NOW,
+        ),
+        issue=issue,
+    )
 
 
 def _clock() -> datetime:
@@ -255,3 +319,182 @@ def test_dispatch_spawn_failure_escalates_existing_attempt(tmp_path: Path) -> No
     )
 
     assert retry.calls[0]["attempt"] == 4
+
+
+# --- concurrency: global + per-state slots (SPEC §8.3) -------------------------
+
+
+def test_available_slots_floors_at_zero() -> None:
+    state = OrchestratorState(max_concurrent_agents=2)
+    assert available_slots(state) == 2
+    _running(state, _issue("i-1", "ABC-1", state="In Progress"))
+    assert available_slots(state) == 1
+    _running(state, _issue("i-2", "ABC-2", state="In Progress"))
+    _running(state, _issue("i-3", "ABC-3", state="In Progress"))
+    assert available_slots(state) == 0  # never negative
+
+
+def test_running_count_for_state_counts_by_tracked_state() -> None:
+    state = OrchestratorState()
+    _running(state, _issue("i-1", "ABC-1", state="Todo"))
+    _running(state, _issue("i-2", "ABC-2", state="In Progress"))
+    _running(state, _issue("i-3", "ABC-3", state="in progress"))  # case-insensitive
+    assert running_count_for_state(state, "In Progress") == 2
+    assert running_count_for_state(state, "Todo") == 1
+    assert running_count_for_state(state, "Done") == 0
+
+
+def test_per_state_slots_use_override_then_fall_back_to_global() -> None:
+    state = OrchestratorState(max_concurrent_agents=5)
+    policy = _policy(by_state={"in progress": 1})
+    # Override present for In Progress.
+    assert per_state_available_slots(state, policy, "In Progress") == 1
+    _running(state, _issue("i-1", "ABC-1", state="In Progress"))
+    assert per_state_available_slots(state, policy, "In Progress") == 0
+    # No override for Todo -> falls back to the global limit (minus Todo runners).
+    assert per_state_available_slots(state, policy, "Todo") == 5
+
+
+# --- DispatchPolicy: precomputed, normalized criteria (SPEC §8.2-8.3) ----------
+
+
+def test_dispatch_policy_from_config_normalizes_once() -> None:
+    config = ServiceConfig(
+        tracker=TrackerConfig(
+            required_labels=["  Bug  ", "READY"],
+            active_states=["Todo", "In Progress"],
+            terminal_states=["Done", "Canceled"],
+        ),
+        agent=AgentConfig(max_concurrent_agents_by_state={"todo": 2}),
+    )
+    policy = DispatchPolicy.from_config(config)
+
+    assert policy.active_states == frozenset({"todo", "in progress"})
+    assert policy.terminal_states == frozenset({"done", "canceled"})
+    assert policy.required_labels == frozenset({"bug", "ready"})
+    assert policy.max_concurrent_by_state == {"todo": 2}
+
+
+# --- should_dispatch: eligibility predicates (SPEC §8.2) -----------------------
+
+
+def test_should_dispatch_accepts_eligible_issue() -> None:
+    state = OrchestratorState(max_concurrent_agents=2)
+    policy = _policy(required_labels=["bug"])
+    issue = _issue(state="In Progress", labels=["bug", "backend"])
+    assert should_dispatch(issue, state, policy)
+
+
+def test_should_dispatch_rejects_missing_core_fields() -> None:
+    state = OrchestratorState()
+    policy = _policy()
+    assert not should_dispatch(_issue(title=""), state, policy)
+    assert not should_dispatch(_issue(issue_id=""), state, policy)
+
+
+def test_should_dispatch_rejects_inactive_or_terminal_state() -> None:
+    state = OrchestratorState()
+    policy = _policy(active_states=["Todo"], terminal_states=["Done"])
+    assert not should_dispatch(_issue(state="In Review"), state, policy)
+    assert not should_dispatch(_issue(state="Done"), state, policy)
+
+
+def test_should_dispatch_requires_all_required_labels() -> None:
+    state = OrchestratorState()
+    policy = _policy(required_labels=["bug", "ready"])
+    assert not should_dispatch(_issue(labels=["bug"]), state, policy)
+    assert should_dispatch(_issue(labels=["Bug", "Ready"]), state, policy) is False
+    # Labels on the issue arrive normalized (lowercased) from the tracker layer.
+    assert should_dispatch(_issue(labels=["bug", "ready"]), state, policy)
+
+
+def test_should_dispatch_rejects_running_or_claimed() -> None:
+    policy = _policy()
+    running_state = OrchestratorState()
+    _running(running_state, _issue())
+    assert not should_dispatch(_issue(), running_state, policy)
+
+    claimed_state = OrchestratorState()
+    claim(claimed_state, "i-1")
+    assert not should_dispatch(_issue(), claimed_state, policy)
+
+
+def test_should_dispatch_rejects_when_no_global_slots() -> None:
+    state = OrchestratorState(max_concurrent_agents=1)
+    policy = _policy()
+    _running(state, _issue("i-9", "ABC-9", state="In Progress"))
+    assert not should_dispatch(_issue(), state, policy)
+
+
+def test_should_dispatch_rejects_when_per_state_slots_exhausted() -> None:
+    state = OrchestratorState(max_concurrent_agents=5)
+    policy = _policy(by_state={"todo": 1})
+    _running(state, _issue("i-9", "ABC-9", state="Todo"))
+    assert not should_dispatch(_issue(state="Todo"), state, policy)
+
+
+def test_should_dispatch_todo_blocked_by_nonterminal_blocker() -> None:
+    state = OrchestratorState()
+    policy = _policy(terminal_states=["Done"])
+    blocked = _issue(blocked_by=[BlockerRef(id="b1", state="In Progress")])
+    assert not should_dispatch(blocked, state, policy)
+
+
+def test_should_dispatch_todo_unknown_blocker_state_blocks() -> None:
+    state = OrchestratorState()
+    policy = _policy(terminal_states=["Done"])
+    blocked = _issue(blocked_by=[BlockerRef(id="b1", state=None)])
+    assert not should_dispatch(blocked, state, policy)
+
+
+def test_should_dispatch_todo_allowed_when_blockers_terminal() -> None:
+    state = OrchestratorState()
+    policy = _policy(terminal_states=["Done"])
+    cleared = _issue(blocked_by=[BlockerRef(id="b1", state="Done")])
+    assert should_dispatch(cleared, state, policy)
+
+
+def test_should_dispatch_blocker_rule_only_applies_to_todo() -> None:
+    state = OrchestratorState()
+    policy = _policy(active_states=["Todo", "In Progress"], terminal_states=["Done"])
+    # Same non-terminal blocker, but the issue is In Progress -> rule does not apply.
+    in_progress = _issue(state="In Progress", blocked_by=[BlockerRef(state="Open")])
+    assert should_dispatch(in_progress, state, policy)
+
+
+# --- sort_for_dispatch: dispatch order (SPEC §8.2) -----------------------------
+
+
+def _dt(day: int) -> datetime:
+    return datetime(2026, 6, day, tzinfo=UTC)
+
+
+def test_sort_orders_by_priority_then_created_then_identifier() -> None:
+    issues = [
+        _issue("i-a", "ABC-3", priority=2, created_at=_dt(2)),
+        _issue("i-b", "ABC-1", priority=1, created_at=_dt(5)),
+        _issue("i-c", "ABC-2", priority=2, created_at=_dt(1)),
+        _issue("i-d", "ABC-4", priority=None, created_at=_dt(1)),
+    ]
+    ordered = [i.identifier for i in sort_for_dispatch(issues)]
+    # priority 1 first; then priority 2 oldest-first (ABC-2 created day 1 before
+    # ABC-3 day 2); null priority sorts last.
+    assert ordered == ["ABC-1", "ABC-2", "ABC-3", "ABC-4"]
+
+
+def test_sort_uses_identifier_tiebreaker_and_is_stable() -> None:
+    issues = [
+        _issue("i-a", "ABC-2", priority=1, created_at=_dt(1)),
+        _issue("i-b", "ABC-1", priority=1, created_at=_dt(1)),
+    ]
+    ordered = [i.identifier for i in sort_for_dispatch(issues)]
+    assert ordered == ["ABC-1", "ABC-2"]
+
+
+def test_sort_places_missing_created_at_last_without_comparing_to_aware() -> None:
+    issues = [
+        _issue("i-a", "ABC-1", priority=1, created_at=None),
+        _issue("i-b", "ABC-2", priority=1, created_at=_dt(9)),
+    ]
+    ordered = [i.identifier for i in sort_for_dispatch(issues)]
+    assert ordered == ["ABC-2", "ABC-1"]

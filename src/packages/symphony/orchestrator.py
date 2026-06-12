@@ -22,7 +22,8 @@ algorithms.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -42,6 +43,7 @@ __all__ = [
     "WorkerHandle",
     "WorkerSpawner",
     "ScheduleRetry",
+    "DispatchPolicy",
     "next_attempt",
     "is_running",
     "is_claimed",
@@ -90,6 +92,49 @@ class ScheduleRetry(Protocol):
         identifier: str,
         error: str | None,
     ) -> OrchestratorState: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchPolicy:
+    """Normalized candidate-selection criteria derived from config (SPEC §8.2-8.3).
+
+    The active/terminal state sets and required-label set depend only on
+    ``tracker`` config, which changes only on reload (SPEC §6.2). Building this
+    once per dispatch pass (via :meth:`from_config`) avoids re-normalizing the same
+    config for every candidate that :func:`should_dispatch` examines.
+
+    Attributes:
+        active_states: Normalized states an issue must be in to dispatch.
+        terminal_states: Normalized states that exclude an issue and that a
+            ``Todo`` issue's blockers must be in.
+        required_labels: Normalized labels an issue must all carry.
+        max_concurrent_by_state: Per-state concurrency overrides (keys already
+            normalized by the config layer); empty means "use the global limit".
+    """
+
+    active_states: frozenset[str] = field(default_factory=frozenset)
+    terminal_states: frozenset[str] = field(default_factory=frozenset)
+    required_labels: frozenset[str] = field(default_factory=frozenset)
+    max_concurrent_by_state: Mapping[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_config(cls, config: ServiceConfig) -> DispatchPolicy:
+        """Precompute the normalized selection criteria from ``config``."""
+        return cls(
+            active_states=frozenset(
+                normalize_state(s) for s in config.tracker.active_states
+            ),
+            terminal_states=frozenset(
+                normalize_state(s) for s in config.tracker.terminal_states
+            ),
+            # Match the trim+lowercase the tracker layer applies to issue labels,
+            # so required labels compare correctly (``normalize_label`` only lowers).
+            required_labels=frozenset(
+                normalize_label(label.strip())
+                for label in config.tracker.required_labels
+            ),
+            max_concurrent_by_state=dict(config.agent.max_concurrent_agents_by_state),
+        )
 
 
 def _utcnow() -> datetime:
@@ -166,17 +211,15 @@ def running_count_for_state(state: OrchestratorState, state_name: str) -> int:
 
 
 def per_state_available_slots(
-    state: OrchestratorState, config: ServiceConfig, state_name: str
+    state: OrchestratorState, policy: DispatchPolicy, state_name: str
 ) -> int:
     """Per-state concurrency slots still free for ``state_name`` (SPEC §8.3).
 
-    Uses ``agent.max_concurrent_agents_by_state`` (keys already normalized by the
-    config layer) when present, otherwise falls back to the global limit.
+    Uses the policy's per-state override when present, otherwise falls back to the
+    global limit.
     """
     target = normalize_state(state_name)
-    limit = config.agent.max_concurrent_agents_by_state.get(
-        target, state.max_concurrent_agents
-    )
+    limit = policy.max_concurrent_by_state.get(target, state.max_concurrent_agents)
     return max(limit - running_count_for_state(state, target), 0)
 
 
@@ -185,7 +228,7 @@ def _has_core_fields(issue: Issue) -> bool:
     return bool(issue.id and issue.identifier and issue.title and issue.state)
 
 
-def _todo_blockers_clear(issue: Issue, terminal_states: set[str]) -> bool:
+def _todo_blockers_clear(issue: Issue, terminal_states: frozenset[str]) -> bool:
     """Todo blocker rule: every blocker must be terminal (SPEC §8.2).
 
     A blocker with an unknown state is treated as non-terminal (it blocks), since
@@ -198,13 +241,15 @@ def _todo_blockers_clear(issue: Issue, terminal_states: set[str]) -> bool:
 
 
 def should_dispatch(
-    issue: Issue, state: OrchestratorState, config: ServiceConfig
+    issue: Issue, state: OrchestratorState, policy: DispatchPolicy
 ) -> bool:
     """Whether ``issue`` is dispatch-eligible right now (SPEC §8.2).
 
     Checks identity, active/terminal state, required labels, the not-running and
     not-claimed claim guards (SPEC §7.1), global and per-state concurrency slots,
-    and the ``Todo`` blocker rule.
+    and the ``Todo`` blocker rule. ``policy`` carries the normalized criteria
+    precomputed once per pass (:meth:`DispatchPolicy.from_config`), so this stays
+    allocation-free across candidates.
 
     Assignee routing (SPEC §8.2) is intentionally not applied: the normative config
     schema (SPEC §6.4) defines no assignee key and the ``Issue`` model (SPEC §4.1.1)
@@ -213,14 +258,11 @@ def should_dispatch(
     if not _has_core_fields(issue):
         return False
 
-    active_states = {normalize_state(s) for s in config.tracker.active_states}
-    terminal_states = {normalize_state(s) for s in config.tracker.terminal_states}
     issue_state = issue.normalized_state
-    if issue_state not in active_states or issue_state in terminal_states:
+    if issue_state not in policy.active_states or issue_state in policy.terminal_states:
         return False
 
-    required = {normalize_label(label) for label in config.tracker.required_labels}
-    if not required.issubset(set(issue.labels)):
+    if not policy.required_labels.issubset(issue.labels):
         return False
 
     if is_running(state, issue.id) or is_claimed(state, issue.id):
@@ -228,11 +270,11 @@ def should_dispatch(
 
     if available_slots(state) <= 0:
         return False
-    if per_state_available_slots(state, config, issue.state) <= 0:
+    if per_state_available_slots(state, policy, issue.state) <= 0:
         return False
 
     # The blocker rule only applies to Todo issues (SPEC §8.2).
-    return issue_state != "todo" or _todo_blockers_clear(issue, terminal_states)
+    return issue_state != "todo" or _todo_blockers_clear(issue, policy.terminal_states)
 
 
 def _dispatch_sort_key(issue: Issue) -> tuple[bool, int, bool, datetime, str]:

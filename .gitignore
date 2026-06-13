@@ -7,9 +7,18 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.local-venv/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+build/
+dist/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # Environment / secrets
 .env

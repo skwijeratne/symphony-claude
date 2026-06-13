@@ -6,15 +6,33 @@ build-backend = "hatchling.build"
 name = "symphony-claude"
 version = "0.1.0"
 description = "Service that orchestrates coding agents (Claude Code, headless) to deliver tracker-driven work."
-readme = "SPEC.md"
+readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
+license-files = ["LICENSE"]
 authors = [{ name = "skwijeratne" }]
+keywords = ["claude", "coding-agent", "orchestration", "linear", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Typing :: Typed",
+]
 dependencies = [
     "pyyaml>=6.0",
     "python-liquid>=2.0,<3",
     "httpx>=0.27,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/skwijeratne/symphony-claude"
+Repository = "https://github.com/skwijeratne/symphony-claude"
+Issues = "https://github.com/skwijeratne/symphony-claude/issues"
+Specification = "https://github.com/skwijeratne/symphony-claude/blob/main/SPEC.md"
 
 [project.scripts]
 symphony = "symphony.cli:main"

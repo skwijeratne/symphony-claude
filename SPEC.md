@@ -1,5 +1,12 @@
 # Symphony Service Specification
 
+> _Adapted from the [Symphony specification](https://github.com/openai/symphony) by OpenAI,
+> Copyright 2025 OpenAI, licensed under the Apache License, Version 2.0 (see `LICENSE-SPEC` and
+> `NOTICE`). **This document has been modified from the original** — notably, the agent-runner
+> contract (Section 10) and the `claude` configuration block (Section 5.3.6) target the Claude
+> Code CLI rather than the Codex app-server. The implementation code in this repository is
+> licensed separately under the MIT License (see `LICENSE`)._
+
 Status: Draft v1 (language-agnostic)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.

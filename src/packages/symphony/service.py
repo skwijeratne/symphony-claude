@@ -18,8 +18,8 @@ event loop. :meth:`SymphonyService.stop` requests a graceful shutdown from any
 thread: pending timers are cancelled, no new work is dispatched, and running
 worker threads are given a bounded grace period to finish their current turn.
 
-Dynamic reload (SPEC §6.2) is applied at the top of every tick via
-``reloader.poll()``: a changed file re-derives the polling cadence, concurrency
+Dynamic reload (SPEC §6.2) is applied at the top of every tick via the config
+source's ``poll()``: a changed file re-derives the polling cadence, concurrency
 limits, dispatch policy, retry backoff cap, and tracker client, while in-flight
 workers keep the config snapshot they started with.
 """
@@ -158,9 +158,11 @@ class SymphonyService:
     """The composed service: orchestrator algorithms bound to a thread runtime.
 
     Args:
-        reloader: The workflow reloader holding the effective configuration;
-            its initial load has already succeeded (SPEC §16.1 startup is
-            strict about that).
+        config_source: The live source of effective configuration — a
+            :class:`~symphony.reload.WorkflowReloader` holding the last known
+            good config and re-applying it on ``WORKFLOW.md`` changes. Its
+            initial load has already succeeded (SPEC §16.1 startup is strict
+            about that).
         tracker_factory: Builds the tracker client for a config; defaults to
             the real Linear client. Injectable for integration tests.
         run_attempt: The worker attempt function; defaults to
@@ -173,14 +175,14 @@ class SymphonyService:
 
     def __init__(
         self,
-        reloader: WorkflowReloader,
+        config_source: WorkflowReloader,
         *,
         tracker_factory: TrackerFactory = _default_tracker_factory,
         run_attempt: RunAttemptFn = run_agent_attempt,
         shutdown_grace_s: float = 5.0,
         now: Callable[[], datetime] = _utcnow,
     ) -> None:
-        self._reloader = reloader
+        self._config_source = config_source
         self._tracker_factory = tracker_factory
         self._run_attempt = run_attempt
         self._shutdown_grace_s = shutdown_grace_s
@@ -190,7 +192,7 @@ class SymphonyService:
         self._tick_timer: threading.Timer | None = None
         self._serving = False
 
-        effective = reloader.current
+        effective = config_source.current
         self._state = OrchestratorState(
             poll_interval_ms=effective.config.polling.interval_ms,
             max_concurrent_agents=effective.config.agent.max_concurrent_agents,
@@ -221,13 +223,13 @@ class SymphonyService:
 
     def _poll_reload(self) -> None:
         """Defensive per-tick reload check (SPEC §6.2)."""
-        outcome = self._reloader.poll()
+        outcome = self._config_source.poll()
         if outcome is None:
             return
         if outcome.applied:
             logger.info("workflow reloaded %s", log_fields(outcome="completed"))
             self._apply_config(outcome.effective)
-        # A failed reload kept the last known good config; the reloader's
+        # A failed reload kept the last known good config; the config source's
         # on_error callback owns the operator-visible message.
 
     # --- lifecycle -----------------------------------------------------------

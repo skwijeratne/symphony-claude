@@ -63,7 +63,8 @@ class ServiceHost(Protocol):
     def stop(self) -> None: ...
 
 
-# Builds the service for a workflow reloader; injectable for host-lifecycle tests.
+# Builds the service from the workflow config source; injectable for
+# host-lifecycle tests.
 ServiceFactory = Callable[[WorkflowReloader], ServiceHost]
 
 
@@ -89,8 +90,8 @@ def run_application(
 
     Args:
         workflow_path: The resolved ``WORKFLOW.md`` path.
-        service_factory: Builds the service from the reloader; injectable so
-            host-lifecycle tests run without the real runtime.
+        service_factory: Builds the service from the config source; injectable
+            so host-lifecycle tests run without the real runtime.
 
     Returns:
         :data:`EXIT_SUCCESS` after a normal start and graceful shutdown.
@@ -99,8 +100,8 @@ def run_application(
         WorkflowConfigError: The workflow failed to load/parse/resolve, or
             startup dispatch validation failed (SPEC §6.3).
     """
-    reloader = WorkflowReloader(workflow_path, on_error=_log_reload_rejected)
-    service = service_factory(reloader)
+    config_source = WorkflowReloader(workflow_path, on_error=_log_reload_rejected)
+    service = service_factory(config_source)
     logger.info("workflow loaded %s", log_fields(workflow_path=workflow_path))
 
     saved_handlers: dict[signal.Signals, object] = {}

@@ -17,7 +17,7 @@ from symphony.exceptions import (
     SymphonyError,
 )
 from symphony.models import Issue
-from symphony.reload import WorkflowReloader
+from symphony.reload import WorkflowConfigStore
 from symphony.service import SymphonyService
 from symphony.stream_parser import AgentEvent, AgentEventType
 
@@ -186,7 +186,7 @@ def _service(
 ) -> SymphonyService:
     path = _write_workflow(tmp_path, interval=interval)
     return SymphonyService(
-        WorkflowReloader(path),
+        WorkflowConfigStore(path),
         tracker_factory=lambda config: tracker,
         run_attempt=worker,
         shutdown_grace_s=shutdown_grace_s,
@@ -199,7 +199,7 @@ def test_serve_fails_startup_on_invalid_dispatch_config(tmp_path: Path) -> None:
     path.write_text("---\ntracker:\n  kind: linear\n---\nprompt\n")  # no api_key
 
     service = SymphonyService(
-        WorkflowReloader(path),
+        WorkflowConfigStore(path),
         tracker_factory=lambda config: _FakeTracker(),
         run_attempt=_FakeWorker(),
     )

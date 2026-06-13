@@ -16,7 +16,7 @@ from symphony.cli import (
     run_application,
 )
 from symphony.exceptions import DispatchPreflightError, MissingWorkflowFileError
-from symphony.reload import WorkflowReloader
+from symphony.reload import WorkflowConfigStore
 from symphony.structured_logging import SYMPHONY_LOGGER_NAME
 
 # A minimal workflow that passes dispatch preflight (SPEC §6.3).
@@ -145,8 +145,10 @@ def test_application_exit_code_is_passed_through(tmp_path: Path) -> None:
 class _FakeService:
     """A ``ServiceHost`` double recording lifecycle calls."""
 
-    def __init__(self, reloader: WorkflowReloader, *, exit_code: int = EXIT_SUCCESS):
-        self.reloader = reloader
+    def __init__(
+        self, config_source: WorkflowConfigStore, *, exit_code: int = EXIT_SUCCESS
+    ):
+        self.config_source = config_source
         self.exit_code = exit_code
         self.served = 0
         self.stopped = 0
@@ -163,23 +165,23 @@ def test_run_application_composes_and_serves_the_service(tmp_path: Path) -> None
     path = _workflow(tmp_path)
     services: list[_FakeService] = []
 
-    def factory(reloader: WorkflowReloader) -> _FakeService:
-        services.append(_FakeService(reloader))
+    def factory(config_source: WorkflowConfigStore) -> _FakeService:
+        services.append(_FakeService(config_source))
         return services[-1]
 
     assert run_application(path, service_factory=factory) == EXIT_SUCCESS
 
     (service,) = services
     assert service.served == 1
-    # The reloader handed over carries the loaded workflow config.
-    assert service.reloader.current.config.tracker.project_slug == "my-team"
+    # The config source handed over carries the loaded workflow config.
+    assert service.config_source.current.config.tracker.project_slug == "my-team"
 
 
 def test_run_application_restores_signal_handlers(tmp_path: Path) -> None:
     path = _workflow(tmp_path)
     before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
 
-    run_application(path, service_factory=lambda reloader: _FakeService(reloader))
+    run_application(path, service_factory=_FakeService)
 
     after = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
     assert after == before

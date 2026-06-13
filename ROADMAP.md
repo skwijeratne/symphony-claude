@@ -77,8 +77,8 @@ _Orientation snapshot. The authoritative state is always `git log origin/main --
     snapshot (`snapshot.py`, §13.3), CLI entrypoint + host lifecycle (`cli.py`, §17.7) — merged;
     completes M6
 - **M7 — in progress**:
-  - 🔄 PR 26 — Service startup & event-loop wiring (`service.py`; agent-update folding in
-    `orchestrator.py`, §7.3, §13.5, §16.1) — open PR
+  - ✅ PR 26 — Service startup & event-loop wiring (`service.py`; agent-update folding in
+    `orchestrator.py`, §7.3, §13.5, §16.1) — merged
   - PR 27 — Real Integration Profile (§17.8, §18.3) — not started; completes Core Conformance
 
 Modules merged on `main`: `exceptions`, `models`, `normalization`, `config`, `config_resolver`,

@@ -1,0 +1,24 @@
+Symphony-Claude
+Copyright (c) 2026 skwijeratne
+
+The implementation code in this repository is licensed under the MIT License
+(see LICENSE).
+
+================================================================================
+
+This repository includes SPEC.md, which is adapted from the Symphony
+specification by OpenAI:
+
+    Symphony
+    https://github.com/openai/symphony
+    Copyright 2025 OpenAI
+    Licensed under the Apache License, Version 2.0.
+
+SPEC.md has been modified from the original. Notably, this version targets the
+Claude Code CLI rather than the Codex app-server: the agent-runner contract
+(Section 10) and the `claude` configuration block (Section 5.3.6) are specific
+to Claude Code.
+
+A copy of the Apache License, Version 2.0, is provided in LICENSE-SPEC. The
+above attribution notice is reproduced from the upstream project's NOTICE file
+in accordance with Section 4(d) of that license.

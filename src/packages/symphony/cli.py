@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Protocol
 
 from symphony.exceptions import SymphonyError, WorkflowConfigError
-from symphony.reload import WorkflowReloader
+from symphony.reload import WorkflowConfigStore
 from symphony.service import SymphonyService
 from symphony.structured_logging import configure_logging, log_fields
 from symphony.workflow_loader import resolve_workflow_path
@@ -65,7 +65,7 @@ class ServiceHost(Protocol):
 
 # Builds the service from the workflow config source; injectable for
 # host-lifecycle tests.
-ServiceFactory = Callable[[WorkflowReloader], ServiceHost]
+ServiceFactory = Callable[[WorkflowConfigStore], ServiceHost]
 
 
 def _log_reload_rejected(error: WorkflowConfigError) -> None:
@@ -100,7 +100,7 @@ def run_application(
         WorkflowConfigError: The workflow failed to load/parse/resolve, or
             startup dispatch validation failed (SPEC §6.3).
     """
-    config_source = WorkflowReloader(workflow_path, on_error=_log_reload_rejected)
+    config_source = WorkflowConfigStore(workflow_path, on_error=_log_reload_rejected)
     service = service_factory(config_source)
     logger.info("workflow loaded %s", log_fields(workflow_path=workflow_path))
 

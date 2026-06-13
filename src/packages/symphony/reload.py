@@ -16,8 +16,8 @@ adjust without a restart (SPEC §6.2). This module owns that reload primitive:
   defensively — for example before each dispatch tick — in case a filesystem watch
   event was missed (SPEC §6.2). This polling-based detection *is* the change
   detector; a continuous OS-level watch loop is left to the host/event-loop wire-up
-  (SPEC §16.1), which can drive :meth:`WorkflowReloader.poll` or
-  :meth:`WorkflowReloader.reload` on whatever cadence it runs.
+  (SPEC §16.1), which can drive :meth:`WorkflowConfigStore.poll` or
+  :meth:`WorkflowConfigStore.reload` on whatever cadence it runs.
 
 Scope boundary: a reload is rejected (last-known-good kept) only for the typed
 :class:`~symphony.exceptions.WorkflowConfigError` family raised by loading and
@@ -40,7 +40,7 @@ from symphony.config_resolver import resolve_config
 from symphony.exceptions import WorkflowConfigError
 from symphony.workflow_loader import load_workflow
 
-__all__ = ["EffectiveConfig", "ReloadOutcome", "WorkflowReloader"]
+__all__ = ["EffectiveConfig", "ReloadOutcome", "WorkflowConfigStore"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +87,7 @@ class ReloadOutcome:
 _Signature = tuple[int, int] | None
 
 
-class WorkflowReloader:
+class WorkflowConfigStore:
     """Holds the effective config and re-applies it on ``WORKFLOW.md`` changes.
 
     The initial load is strict: construction loads, resolves, and adopts the

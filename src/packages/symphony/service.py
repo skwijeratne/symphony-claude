@@ -3,7 +3,7 @@
 :class:`SymphonyService` wires the deterministic orchestrator algorithms to a
 concrete runtime: worker threads running
 :func:`~symphony.agent_runner.run_agent_attempt`, ``threading.Timer`` retry and
-tick timers, the :class:`~symphony.reload.WorkflowReloader` watch, the Linear
+tick timers, the :class:`~symphony.reload.WorkflowConfigStore` watch, the Linear
 tracker client, and the runtime snapshot. The runtime model is a single
 orchestrator thread consuming an event queue — every timer, worker thread, and
 snapshot consumer communicates by enqueuing an event, so only the event loop
@@ -57,7 +57,7 @@ from symphony.orchestrator import (
     startup_terminal_workspace_cleanup,
 )
 from symphony.preflight import check_dispatch_preflight, ensure_dispatchable
-from symphony.reload import EffectiveConfig, WorkflowReloader
+from symphony.reload import EffectiveConfig, WorkflowConfigStore
 from symphony.snapshot import RuntimeSnapshot, build_snapshot
 from symphony.stream_parser import AgentEvent
 from symphony.structured_logging import log_fields
@@ -159,7 +159,7 @@ class SymphonyService:
 
     Args:
         config_source: The live source of effective configuration — a
-            :class:`~symphony.reload.WorkflowReloader` holding the last known
+            :class:`~symphony.reload.WorkflowConfigStore` holding the last known
             good config and re-applying it on ``WORKFLOW.md`` changes. Its
             initial load has already succeeded (SPEC §16.1 startup is strict
             about that).
@@ -175,7 +175,7 @@ class SymphonyService:
 
     def __init__(
         self,
-        config_source: WorkflowReloader,
+        config_source: WorkflowConfigStore,
         *,
         tracker_factory: TrackerFactory = _default_tracker_factory,
         run_attempt: RunAttemptFn = run_agent_attempt,

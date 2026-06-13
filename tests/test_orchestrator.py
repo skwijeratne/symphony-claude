@@ -41,6 +41,7 @@ from symphony.orchestrator import (
     is_running,
     mark_completed,
     next_attempt,
+    on_agent_update,
     on_retry_timer,
     on_worker_exit,
     per_state_available_worker_slots,
@@ -54,6 +55,7 @@ from symphony.orchestrator import (
     startup_terminal_workspace_cleanup,
     terminate_running_issue,
 )
+from symphony.stream_parser import AgentEvent, AgentEventType
 from symphony.workspace import ensure_workspace, workspace_path_for
 
 _FIXED_NOW = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
@@ -1531,3 +1533,156 @@ def test_startup_cleanup_fetch_failure_is_operator_visible(
     assert removed == 0
     assert "startup workspace cleanup skipped" in caplog.text
     assert 'reason="terminal-issue fetch failed"' in caplog.text
+
+
+# --- on_agent_update: live session + rate limits (SPEC §7.3, §13.5) -------------
+
+
+def _agent_event(
+    event_type: AgentEventType = AgentEventType.OTHER_MESSAGE,
+    *,
+    raw: dict[str, object] | None = None,
+    session_id: str | None = None,
+    subtype: str | None = None,
+    is_terminal: bool = False,
+) -> AgentEvent:
+    return AgentEvent(
+        event_type,
+        raw=raw if raw is not None else {},
+        session_id=session_id,
+        subtype=subtype,
+        is_terminal=is_terminal,
+    )
+
+
+def _session_started(session_id: str = "sess-1") -> AgentEvent:
+    return _agent_event(
+        AgentEventType.SESSION_STARTED, session_id=session_id, subtype="init"
+    )
+
+
+def _sessionless_running(state: OrchestratorState, issue: Issue) -> None:
+    """Register ``issue`` as running with no agent session started yet."""
+    _run_entry(state, issue)
+    state.running[issue.id].session = None
+
+
+def test_agent_update_creates_the_session_on_the_first_identified_event() -> None:
+    state = OrchestratorState()
+    _sessionless_running(state, _issue(state="In Progress"))
+
+    on_agent_update(state, "i-1", _session_started(), now=_clock)
+
+    session = state.running["i-1"].session
+    assert session is not None
+    assert session.session_id == "sess-1"
+    assert session.turn_count == 1
+    assert session.last_event == "session_started/init"
+    assert session.last_event_timestamp == _FIXED_NOW
+
+
+def test_agent_update_without_a_session_id_before_a_session_is_ignored() -> None:
+    state = OrchestratorState()
+    _sessionless_running(state, _issue(state="In Progress"))
+
+    on_agent_update(state, "i-1", _agent_event(AgentEventType.NOTIFICATION))
+
+    assert state.running["i-1"].session is None
+
+
+def test_agent_update_counts_one_turn_per_session_started() -> None:
+    state = OrchestratorState()
+    _sessionless_running(state, _issue(state="In Progress"))
+
+    on_agent_update(state, "i-1", _session_started())
+    on_agent_update(state, "i-1", _agent_event(AgentEventType.NOTIFICATION))
+    on_agent_update(state, "i-1", _session_started())
+
+    session = state.running["i-1"].session
+    assert session is not None
+    assert session.turn_count == 2
+
+
+def test_agent_update_accumulates_tokens_on_terminal_results() -> None:
+    state = OrchestratorState()
+    _sessionless_running(state, _issue(state="In Progress"))
+    on_agent_update(state, "i-1", _session_started())
+    result = _agent_event(
+        AgentEventType.TURN_COMPLETED,
+        raw={
+            "usage": {"input_tokens": 10, "output_tokens": 4},
+            "total_cost_usd": 0.5,
+            "result": "did the thing",
+        },
+        session_id="sess-1",
+        subtype="success",
+        is_terminal=True,
+    )
+
+    on_agent_update(state, "i-1", result)
+    on_agent_update(state, "i-1", result)
+
+    session = state.running["i-1"].session
+    assert session is not None
+    assert session.input_tokens == 20
+    assert session.output_tokens == 8
+    assert session.total_tokens == 28  # derived input + output per result
+    assert session.last_cost_usd == 0.5
+    assert session.last_message == "did the thing"
+    # Aggregate totals are folded in once at worker exit, never per event.
+    assert state.agent_totals.total_tokens == 0
+
+
+def test_agent_update_for_an_unknown_issue_is_a_state_no_op() -> None:
+    state = OrchestratorState()
+
+    on_agent_update(state, "i-404", _session_started())
+
+    assert state.running == {}
+
+
+def test_api_retry_event_updates_the_rate_limit_snapshot() -> None:
+    state = OrchestratorState()
+    event = _agent_event(
+        AgentEventType.API_RETRY,
+        raw={
+            "error": {"category": "rate_limit", "error_status": 429},
+            "retry_after_ms": 7000,
+        },
+    )
+
+    on_agent_update(state, "i-404", event, now=_clock)  # tracked even when not running
+
+    limits = state.agent_rate_limits
+    assert limits.is_rate_limited is True
+    assert limits.retry_after_ms == 7000
+    assert limits.last_api_error_status == 429
+    assert limits.updated_at == _FIXED_NOW
+
+
+def test_non_rate_limit_api_retry_clears_the_rate_limited_flag() -> None:
+    state = OrchestratorState()
+    state.agent_rate_limits.is_rate_limited = True
+    event = _agent_event(
+        AgentEventType.API_RETRY, raw={"error": {"category": "server_error"}}
+    )
+
+    on_agent_update(state, "i-1", event)
+
+    assert state.agent_rate_limits.is_rate_limited is False
+
+
+def test_terminal_result_records_api_error_status() -> None:
+    state = OrchestratorState()
+    _run_entry(state, _issue(state="In Progress"))
+    event = _agent_event(
+        AgentEventType.TURN_FAILED,
+        raw={"api_error_status": 529},
+        session_id="sess-1",
+        is_terminal=True,
+    )
+
+    on_agent_update(state, "i-1", event, now=_clock)
+
+    assert state.agent_rate_limits.last_api_error_status == 529
+    assert state.agent_rate_limits.updated_at == _FIXED_NOW

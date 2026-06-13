@@ -9,8 +9,8 @@ outcomes are reported back to it and converted into explicit state transitions
 - candidate selection, sorting, and concurrency (SPEC §8.2-8.3),
 - ``dispatch_issue`` (SPEC §16.4), retry/backoff (SPEC §8.4, §16.6), and active-run
   reconciliation (SPEC §8.5, §16.3), and
-- the poll-and-dispatch tick, worker-exit accounting, and startup cleanup that
-  compose them (SPEC §8.1, §8.6, §13.5, §16.2).
+- the poll-and-dispatch tick, worker-exit accounting, agent-update folding, and
+  startup cleanup that compose them (SPEC §7.3, §8.1, §8.6, §13.5, §16.2).
 
 Everything the runtime supplies — spawning/stopping workers, arming timers,
 tracker calls, observer notifications, the clock — is an injected seam
@@ -41,6 +41,7 @@ from symphony.exceptions import InvalidWorkspacePathError, TrackerError
 from symphony.hooks import HookKind, run_hook
 from symphony.models import (
     Issue,
+    LiveSession,
     OrchestratorState,
     RetryEntry,
     RunAttempt,
@@ -48,6 +49,7 @@ from symphony.models import (
     RunningEntry,
 )
 from symphony.normalization import normalize_label, normalize_state
+from symphony.stream_parser import AgentEvent, AgentEventType
 from symphony.structured_logging import log_fields
 from symphony.workspace import remove_workspace, workspace_path_for
 
@@ -86,6 +88,7 @@ __all__ = [
     "NotifyObservers",
     "run_tick",
     "on_worker_exit",
+    "on_agent_update",
     "startup_terminal_workspace_cleanup",
 ]
 
@@ -936,6 +939,125 @@ def _accumulate_totals(
     totals.total_tokens += result.total_tokens
     if result.cost_usd is not None:
         totals.total_cost_usd += result.cost_usd
+
+
+# --- Agent updates: live session + rate limits (SPEC §7.3, §13.5) ---------------
+
+_RATE_LIMIT_CATEGORIES = frozenset({"rate_limit", "overloaded"})
+"""``api_retry`` error categories that indicate rate limiting (SPEC §13.5)."""
+
+_LAST_MESSAGE_MAX_CHARS = 200
+"""Cap on the stored last-event summary, so state never holds large payloads
+(SPEC §13.1 discourages keeping raw payloads around)."""
+
+
+def _as_int(value: object) -> int:
+    """Lenient int extraction for usage fields (SPEC §13.5)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _summarize_event(event: AgentEvent) -> str | None:
+    """A compact human summary of an event payload, or ``None`` when it has none."""
+    payload = event.raw.get("result") or event.raw.get("message")
+    if payload is None:
+        return None
+    return str(payload)[:_LAST_MESSAGE_MAX_CHARS]
+
+
+def _track_rate_limits(
+    state: OrchestratorState, event: AgentEvent, now_dt: datetime
+) -> None:
+    """Fold one event's rate-limit / API-retry signal into state (SPEC §13.5).
+
+    Tracks the *latest* signal: an ``api_retry`` event updates the snapshot from
+    its error category/status, and a terminal ``result`` carrying
+    ``api_error_status`` records that status. Other events leave the snapshot
+    untouched.
+    """
+    limits = state.agent_rate_limits
+    if event.type is AgentEventType.API_RETRY:
+        error = event.raw.get("error")
+        error_map = error if isinstance(error, dict) else {}
+        limits.is_rate_limited = error_map.get("category") in _RATE_LIMIT_CATEGORIES
+        retry_after = _as_int(event.raw.get("retry_after_ms"))
+        limits.retry_after_ms = retry_after if retry_after > 0 else None
+        status = _as_int(error_map.get("error_status"))
+        if status > 0:
+            limits.last_api_error_status = status
+        limits.updated_at = now_dt
+    elif event.is_terminal:
+        status = _as_int(event.raw.get("api_error_status"))
+        if status > 0:
+            limits.last_api_error_status = status
+            limits.updated_at = now_dt
+
+
+def on_agent_update(
+    state: OrchestratorState,
+    issue_id: str,
+    event: AgentEvent,
+    *,
+    now: Callable[[], datetime] = _utcnow,
+) -> OrchestratorState:
+    """Fold one agent ``stream-json`` event into state (SPEC §7.3, §13.5).
+
+    Updates the running entry's :class:`~symphony.models.LiveSession` — created
+    on the first event that carries a ``session_id`` — with the last-event
+    fields, per-run token counters (added once per terminal ``result``, per
+    SPEC §13.5), and the turn counter (one per ``session_started``). The
+    rate-limit / API-retry snapshot is tracked from any agent update, even one
+    whose worker is no longer running.
+
+    Aggregate ``agent_totals`` are intentionally *not* touched here: the
+    attempt's totals are folded in once by :func:`on_worker_exit`, so per-event
+    accounting feeds only the live session view.
+    """
+    _track_rate_limits(state, event, now())
+
+    entry = state.running.get(issue_id)
+    if entry is None:
+        return state
+
+    session = entry.session
+    if session is None:
+        if event.session_id is None:
+            return state  # no session yet and this event cannot start one
+        session = LiveSession(session_id=event.session_id)
+        entry.session = session
+        logger.info(
+            "agent session started %s",
+            log_fields(
+                issue_id=issue_id,
+                issue_identifier=entry.run_attempt.issue_identifier,
+                session_id=session.session_id,
+            ),
+        )
+
+    if event.type is AgentEventType.SESSION_STARTED:
+        session.turn_count += 1
+
+    session.last_event = (
+        f"{event.type.value}/{event.subtype}" if event.subtype else event.type.value
+    )
+    session.last_event_timestamp = now()
+    summary = _summarize_event(event)
+    if summary is not None:
+        session.last_message = summary
+
+    if event.is_terminal:
+        usage = event.raw.get("usage")
+        usage_map = usage if isinstance(usage, dict) else {}
+        input_tokens = _as_int(usage_map.get("input_tokens"))
+        output_tokens = _as_int(usage_map.get("output_tokens"))
+        session.input_tokens += input_tokens
+        session.output_tokens += output_tokens
+        # Derive the total as input + output; the CLI usage map has no total field.
+        session.total_tokens += input_tokens + output_tokens
+        cost = event.raw.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            session.last_cost_usd = float(cost)
+
+    return state
 
 
 # --- Startup terminal-workspace cleanup (SPEC §8.6) ----------------------------

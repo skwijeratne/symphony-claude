@@ -111,6 +111,10 @@ typed config with defaults and `$VAR` indirection. The full schema — tracker,
 polling, workspace, hooks, agent, and `claude` settings — is specified in
 [`SPEC.md`](SPEC.md) §5.3 and §6, with a cheat sheet in §6.4.
 
+For a fully annotated starting point — every field explained, with an opinionated
+set of choices for a single-machine deployment — see
+[`docs/WORKFLOW.sample.md`](docs/WORKFLOW.sample.md).
+
 ## Development
 
 CI runs on Python 3.13 and must be green to merge. Run the same gate locally:
@@ -141,6 +145,8 @@ ROADMAP.md               # milestones and PR breakdown
 - [`SPEC.md`](SPEC.md) — the normative specification (the source of truth).
 - [`TECH.md`](TECH.md) — stack and coding standards.
 - [`ROADMAP.md`](ROADMAP.md) — milestones and status.
+- [`docs/WORKFLOW.sample.md`](docs/WORKFLOW.sample.md) — an annotated example
+  workflow file.
 - `docs/` — HTML diagrams of the data model, retry/dispatch flow, and the
   service tick loop.
 

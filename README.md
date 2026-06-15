@@ -98,8 +98,11 @@ Then run the service (the path is optional; it defaults to `./WORKFLOW.md`):
 
 ```bash
 export LINEAR_API_KEY=lin_...
-symphony                       # or: symphony path/to/WORKFLOW.md
+uv run symphony                # or: uv run symphony path/to/WORKFLOW.md
 ```
+
+If you installed with pip into an active environment (or activated the uv
+virtualenv), the bare `symphony` command works too.
 
 `Ctrl-C` (or `SIGTERM`) triggers a graceful shutdown. The process exits `0` on a
 normal start-and-shutdown and non-zero on a startup failure.

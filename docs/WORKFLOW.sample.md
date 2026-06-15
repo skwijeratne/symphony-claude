@@ -20,7 +20,10 @@ tracker:
   api_key: $LINEAR_API_KEY         # REQUIRED. `$VAR` is resolved from the env at
                                    # startup/reload — never hardcode a token.
                                    # Export LINEAR_API_KEY before launching.
-  project_slug: your-team-slug     # REQUIRED for linear. The project to watch.
+  project_slug: a1b2c3d4e5f6       # REQUIRED for linear. The project's Linear
+                                   # `slugId` (the trailing token in the project
+                                   # URL, .../project/<name>-<slugId>), NOT the
+                                   # display name. Issues are filtered by slugId.
 
   # CHOICE: gate work behind an explicit label so the service only touches
   # issues you have opted in. Strongly recommended — without it, every issue in

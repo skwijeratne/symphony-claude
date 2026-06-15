@@ -81,7 +81,7 @@ configuration) followed by the prompt template body:
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY      # $-resolved from the environment
-  project_slug: my-team
+  project_slug: a1b2c3d4e5f6    # Linear project slugId, not the display name
 polling:
   interval_ms: 30000
 agent:
@@ -93,6 +93,19 @@ You are working on issue {{ issue.identifier }}: {{ issue.title }}.
 
 Implement the change described in the issue, then stop.
 ```
+
+`project_slug` is the Linear project's `slugId`, not its display name. Look it up
+by name with (the API key goes in the `Authorization` header with no `Bearer`
+prefix — Linear personal-key convention):
+
+```bash
+curl -s https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"query":"query($n:String!){projects(filter:{name:{eq:$n}}){nodes{name slugId}}}","variables":{"n":"My Project"}}'
+```
+
+Replace `My Project` with your project's name; the `slugId` field in the response
+is the value to put in `project_slug`. (Omit the `filter` to list every project.)
 
 Then run the service (the path is optional; it defaults to `./WORKFLOW.md`):
 

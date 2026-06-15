@@ -1,0 +1,39 @@
+# Keep the build context small and deterministic. The Dockerfile copies only
+# pyproject.toml, README.md, LICENSE, and src/, but excluding the rest speeds up
+# the build and avoids leaking local state into layers.
+
+.git
+.github
+.gitignore
+
+# Python / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.local-venv/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editor / OS
+.idea/
+.DS_Store
+
+# Not needed in the image
+tests/
+docs/
+uv.lock
+*.md
+!README.md
+Dockerfile
+.dockerignore

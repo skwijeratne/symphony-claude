@@ -104,6 +104,32 @@ symphony                       # or: symphony path/to/WORKFLOW.md
 `Ctrl-C` (or `SIGTERM`) triggers a graceful shutdown. The process exits `0` on a
 normal start-and-shutdown and non-zero on a startup failure.
 
+## Run with Docker
+
+The provided [`Dockerfile`](Dockerfile) bundles the service together with git
+and the Node-based Claude Code CLI, so the container can run an end-to-end loop.
+
+```bash
+docker build -t symphony-claude .
+
+docker run --rm -it \
+  -v "$PWD:/work" \
+  -e LINEAR_API_KEY \
+  -e ANTHROPIC_API_KEY \
+  symphony-claude
+```
+
+Mount your `WORKFLOW.md` (and, if your hooks operate on it, your repo) at `/work`
+— the default working directory — and pass `LINEAR_API_KEY` (for the tracker) and
+`ANTHROPIC_API_KEY` (for the Claude Code CLI) as environment variables. Pass a
+path argument to use a different workflow file:
+`docker run ... symphony-claude configs/WORKFLOW.md`.
+
+The image installs only `git`, Node.js, and the Claude Code CLI. If your hooks or
+the agent need a language toolchain (e.g. a specific Python, Node, or package
+manager to build the target repo), extend the image with a `FROM symphony-claude`
+layer that adds it.
+
 ## Configuration
 
 All configuration lives in `WORKFLOW.md` front matter and is resolved into a

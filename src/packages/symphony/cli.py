@@ -1,7 +1,8 @@
 """CLI entrypoint and host process lifecycle (SPEC §17.7, §16.1).
 
-``symphony [path-to-WORKFLOW.md]`` — the positional workflow path is optional
-and defaults to ``WORKFLOW.md`` in the current working directory (SPEC §5.1).
+``symphony [-d/--debug] [path-to-WORKFLOW.md]`` — the positional workflow path is
+optional and defaults to ``WORKFLOW.md`` in the current working directory (SPEC
+§5.1). ``--debug`` lowers the ``symphony`` logger threshold from INFO to DEBUG.
 
 :func:`main` owns the host lifecycle conformance surface (SPEC §17.7): argument
 parsing, workflow path resolution, logging configuration (SPEC §16.1
@@ -129,6 +130,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="path-to-WORKFLOW.md",
         help="workflow file to run (default: ./WORKFLOW.md)",
     )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="enable verbose DEBUG-level logging (default: INFO)",
+    )
     return parser
 
 
@@ -150,7 +157,7 @@ def main(
         for a missing workflow file, a startup failure, or an abnormal exit.
     """
     args = _build_parser().parse_args(argv)
-    configure_logging()
+    configure_logging(level=logging.DEBUG if args.debug else logging.INFO)
 
     workflow_path = resolve_workflow_path(args.workflow_path)
     if not workflow_path.is_file():

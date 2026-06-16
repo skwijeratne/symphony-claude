@@ -105,6 +105,25 @@ def test_usage_error_exits_2_via_argparse() -> None:
     assert excinfo.value.code == 2
 
 
+# --- logging level (SPEC §16.1) ---------------------------------------------------
+def test_default_logging_level_is_info(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    main([str(path)], run_app=lambda _: EXIT_SUCCESS)
+    assert logging.getLogger(SYMPHONY_LOGGER_NAME).level == logging.INFO
+
+
+def test_debug_flag_lowers_logging_level_to_debug(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    main([str(path), "--debug"], run_app=lambda _: EXIT_SUCCESS)
+    assert logging.getLogger(SYMPHONY_LOGGER_NAME).level == logging.DEBUG
+
+
+def test_debug_flag_short_form(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    main([str(path), "-d"], run_app=lambda _: EXIT_SUCCESS)
+    assert logging.getLogger(SYMPHONY_LOGGER_NAME).level == logging.DEBUG
+
+
 # --- startup failure and exit codes (SPEC §17.7) -----------------------------------
 def test_startup_failure_is_surfaced_cleanly(
     tmp_path: Path, caplog: pytest.LogCaptureFixture

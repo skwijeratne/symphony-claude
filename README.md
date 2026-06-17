@@ -120,6 +120,26 @@ virtualenv), the bare `symphony` command works too.
 `Ctrl-C` (or `SIGTERM`) triggers a graceful shutdown. The process exits `0` on a
 normal start-and-shutdown and non-zero on a startup failure.
 
+### Injecting variables
+
+`--var NAME=VALUE` (repeatable) injects an environment variable for the run. It
+is merged into the process environment before config is resolved, so it is
+visible to config `$VAR` indirection (`tracker.api_key`, `workspace.root`), hook
+scripts, and the agent subprocess — handy for secrets like a git token used by an
+`after_create` clone. An explicit `--var` overrides an inherited variable of the
+same name; on a duplicate name, the last one wins.
+
+```bash
+uv run symphony \
+  --var LINEAR_API_KEY=lin_... \
+  --var GIT_TOKEN=ghp_... \
+  path/to/WORKFLOW.md
+```
+
+Injected variables are **not** exposed to the prompt template (only `issue.*` and
+`attempt` are), so secrets stay out of the model context. Only the variable
+*names* are logged, never their values.
+
 ## Run with Docker
 
 The provided [`Dockerfile`](Dockerfile) bundles the service together with git

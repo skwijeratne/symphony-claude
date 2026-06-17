@@ -19,7 +19,8 @@ tracker:
   kind: linear                     # REQUIRED. Only `linear` is supported today.
   api_key: $LINEAR_API_KEY         # REQUIRED. `$VAR` is resolved from the env at
                                    # startup/reload — never hardcode a token.
-                                   # Export LINEAR_API_KEY before launching.
+                                   # Export LINEAR_API_KEY before launching, or
+                                   # pass it at runtime: `symphony --var LINEAR_API_KEY=lin_...`.
   project_slug: a1b2c3d4e5f6       # REQUIRED for linear. The project's Linear
                                    # `slugId` (the trailing token in the project
                                    # URL, .../project/<name>-<slugId>), NOT the

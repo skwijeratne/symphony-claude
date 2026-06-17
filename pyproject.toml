@@ -8,14 +8,14 @@ version = "0.1.0"
 description = "Service that orchestrates coding agents (Claude Code, headless) to deliver tracker-driven work."
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "MIT" }
-license-files = ["LICENSE"]
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "skwijeratne" }]
 keywords = ["claude", "coding-agent", "orchestration", "linear", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",

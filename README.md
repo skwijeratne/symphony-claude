@@ -1,7 +1,7 @@
 # Symphony-Claude
 
 [![CI](https://github.com/skwijeratne/symphony-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/skwijeratne/symphony-claude/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
 
 A long-running Python service that orchestrates the **Claude Code CLI** (headless
@@ -220,13 +220,12 @@ our [Code of Conduct](CODE_OF_CONDUCT.md) first. For security issues, follow
 
 ## License
 
-This repository is licensed in two parts:
+This repository is licensed under the [Apache License 2.0](LICENSE).
 
-- **Implementation code** (everything under `src/` and `tests/`) — the
-  [MIT License](LICENSE).
-- **[`SPEC.md`](SPEC.md)** — adapted from OpenAI's Symphony specification and
-  retained under the [Apache License 2.0](LICENSE-SPEC) (Copyright 2025 OpenAI).
-  See [`NOTICE`](NOTICE) for attribution.
+[`SPEC.md`](SPEC.md) and [`WORKFLOW.md`](WORKFLOW.md) are adapted from OpenAI's
+Symphony specification and sample workflow (Copyright 2025 OpenAI, also Apache
+2.0) and have been modified for the Claude Code CLI. See [`NOTICE`](NOTICE) for
+attribution.
 
 ## Acknowledgements
 

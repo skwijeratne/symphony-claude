@@ -1,8 +1,11 @@
 """CLI entrypoint and host process lifecycle (SPEC §17.7, §16.1).
 
-``symphony [-d/--debug] [path-to-WORKFLOW.md]`` — the positional workflow path is
-optional and defaults to ``WORKFLOW.md`` in the current working directory (SPEC
-§5.1). ``--debug`` lowers the ``symphony`` logger threshold from INFO to DEBUG.
+``symphony [-d/--debug] [--var NAME=VALUE ...] [path-to-WORKFLOW.md]`` — the
+positional workflow path is optional and defaults to ``WORKFLOW.md`` in the
+current working directory (SPEC §5.1). ``--debug`` lowers the ``symphony`` logger
+threshold from INFO to DEBUG. ``--var`` (repeatable) injects an environment
+variable for the run, visible to config ``$VAR`` indirection, hook scripts, and
+the agent subprocess (SPEC §6.1).
 
 :func:`main` owns the host lifecycle conformance surface (SPEC §17.7): argument
 parsing, workflow path resolution, logging configuration (SPEC §16.1
@@ -19,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import re
 import signal
 import threading
 from collections.abc import Callable, Sequence
@@ -116,6 +121,30 @@ def run_application(
             signal.signal(signum, handler)  # type: ignore[arg-type]
 
 
+# POSIX environment-variable name (what a shell and ``$VAR`` indirection accept).
+_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _parse_var_assignment(raw: str) -> tuple[str, str]:
+    """Parse a ``--var NAME=VALUE`` token into a ``(name, value)`` pair.
+
+    Splits on the first ``=`` only, so values may themselves contain ``=`` (for
+    example base64 tokens). The name must be a valid environment-variable name;
+    the value may be empty. Invalid input raises :class:`argparse.ArgumentTypeError`
+    so it surfaces as a usage error (exit ``2``).
+    """
+    name, sep, value = raw.partition("=")
+    if not sep:
+        raise argparse.ArgumentTypeError(
+            f"expected NAME=VALUE, got {raw!r} (missing '=')"
+        )
+    if not _VAR_NAME.match(name):
+        raise argparse.ArgumentTypeError(
+            f"invalid variable name {name!r}: must match [A-Za-z_][A-Za-z0-9_]*"
+        )
+    return name, value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="symphony",
@@ -135,6 +164,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--debug",
         action="store_true",
         help="enable verbose DEBUG-level logging (default: INFO)",
+    )
+    parser.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        type=_parse_var_assignment,
+        help=(
+            "inject an environment variable for this run (repeatable); available "
+            "to config $VAR indirection, hook scripts, and the agent subprocess. "
+            "Overrides an existing env var of the same name. Last wins on "
+            "duplicate names."
+        ),
     )
     return parser
 
@@ -158,6 +200,15 @@ def main(
     """
     args = _build_parser().parse_args(argv)
     configure_logging(level=logging.DEBUG if args.debug else logging.INFO)
+
+    # Inject any --var NAME=VALUE into the process environment before config
+    # resolution, so they are visible to $VAR indirection, hook scripts, and the
+    # agent subprocess (SPEC §6.1). Last wins; --var overrides an inherited env
+    # var. Values are secrets, so only the names are logged.
+    cli_vars = dict(args.var)
+    os.environ.update(cli_vars)
+    if cli_vars:
+        logger.info("injected cli vars %s", log_fields(names=",".join(cli_vars)))
 
     workflow_path = resolve_workflow_path(args.workflow_path)
     if not workflow_path.is_file():

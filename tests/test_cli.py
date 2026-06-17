@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 import signal
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,6 +14,7 @@ import pytest
 from symphony.cli import (
     EXIT_STARTUP_FAILURE,
     EXIT_SUCCESS,
+    _parse_var_assignment,
     main,
     run_application,
 )
@@ -122,6 +125,81 @@ def test_debug_flag_short_form(tmp_path: Path) -> None:
     path = _workflow(tmp_path)
     main([str(path), "-d"], run_app=lambda _: EXIT_SUCCESS)
     assert logging.getLogger(SYMPHONY_LOGGER_NAME).level == logging.DEBUG
+
+
+# --- --var environment injection (SPEC §6.1) --------------------------------------
+def test_parse_var_assignment_basic() -> None:
+    assert _parse_var_assignment("GIT_TOKEN=ghp_x") == ("GIT_TOKEN", "ghp_x")
+
+
+def test_parse_var_assignment_value_with_equals() -> None:
+    # Split on the first '=' only, so token values keeping '=' survive intact.
+    assert _parse_var_assignment("B64=aGk=eA==") == ("B64", "aGk=eA==")
+
+
+def test_parse_var_assignment_empty_value_allowed() -> None:
+    assert _parse_var_assignment("EMPTY=") == ("EMPTY", "")
+
+
+def test_parse_var_assignment_missing_equals_rejected() -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_var_assignment("NOEQUALS")
+
+
+@pytest.mark.parametrize("bad", ["9LEADS=x", "HAS SPACE=x", "HAS-DASH=x", "=x"])
+def test_parse_var_assignment_invalid_name_rejected(bad: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_var_assignment(bad)
+
+
+def test_var_is_injected_into_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("INJECTED_TOKEN", raising=False)
+    path = _workflow(tmp_path)
+    main([str(path), "--var", "INJECTED_TOKEN=secret"], run_app=lambda _: EXIT_SUCCESS)
+    assert os.environ["INJECTED_TOKEN"] == "secret"
+
+
+def test_multiple_vars_all_injected_last_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("A", raising=False)
+    monkeypatch.delenv("B", raising=False)
+    path = _workflow(tmp_path)
+    main(
+        [str(path), "--var", "A=1", "--var", "B=2", "--var", "A=3"],
+        run_app=lambda _: EXIT_SUCCESS,
+    )
+    assert os.environ["A"] == "3"
+    assert os.environ["B"] == "2"
+
+
+def test_var_overrides_existing_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_TOKEN", "old")
+    path = _workflow(tmp_path)
+    main([str(path), "--var", "GIT_TOKEN=new"], run_app=lambda _: EXIT_SUCCESS)
+    assert os.environ["GIT_TOKEN"] == "new"
+
+
+def test_malformed_var_exits_2_via_argparse(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        main([str(path), "--var", "NOEQUALS"])
+    assert excinfo.value.code == 2
+
+
+def test_var_values_are_not_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("SECRET", raising=False)
+    path = _workflow(tmp_path)
+    with caplog.at_level(logging.INFO, logger=SYMPHONY_LOGGER_NAME):
+        main([str(path), "--var", "SECRET=topsecret"], run_app=lambda _: EXIT_SUCCESS)
+    assert "topsecret" not in caplog.text
+    assert "SECRET" in caplog.text
 
 
 # --- startup failure and exit codes (SPEC §17.7) -----------------------------------
